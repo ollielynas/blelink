@@ -7,4 +7,7 @@
     <string name="live_gallery">Live gallery</string>
     <string name="empty_gallery">No photos yet — waiting for someone to send one</string>
     <string name="gallery_photo_description">Received photo</string>
+
+    <string name="music_title">Music queue</string>
+    <string name="music_explainer">Guests can search and queue YouTube videos from the web page — they play here, on this phone, automatically one after another.</string>
 </resources>

@@ -1,0 +1,58 @@
+<!doctype html>
+<html>
+<head>
+<meta charset="utf-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1" />
+<style>
+  html, body { margin: 0; padding: 0; background: #000; overflow: hidden; }
+  #player { width: 100%; height: 100%; }
+</style>
+</head>
+<body>
+<div id="player"></div>
+<script src="https://www.youtube.com/iframe_api"></script>
+<script>
+  // Minimal queue player driven from the Android side via evaluateJavascript("addToQueue('<id>')").
+  // Videos play in the order they're queued; the next one starts automatically when one ends.
+  let player = null;
+  let ready = false;
+  let isPlaying = false;
+  const queue = [];
+
+  function onYouTubeIframeAPIReady() {
+    player = new YT.Player('player', {
+      height: '100%',
+      width: '100%',
+      playerVars: { playsinline: 1, autoplay: 1, controls: 1, rel: 0 },
+      events: {
+        onReady: () => { ready = true; playNextIfIdle(); },
+        onStateChange: onPlayerStateChange
+      }
+    });
+  }
+
+  function onPlayerStateChange(event) {
+    if (event.data === YT.PlayerState.PLAYING) {
+      isPlaying = true;
+    } else if (event.data === YT.PlayerState.ENDED) {
+      isPlaying = false;
+      playNextIfIdle();
+    }
+  }
+
+  function playNextIfIdle() {
+    if (!isPlaying && queue.length > 0) {
+      const videoId = queue.shift();
+      isPlaying = true; // optimistic; corrected by the next onStateChange if it doesn't actually start
+      player.loadVideoById(videoId);
+    }
+  }
+
+  // Called from MainActivity.kt when a guest queues a song.
+  function addToQueue(videoId) {
+    queue.push(videoId);
+    if (ready) playNextIfIdle();
+  }
+</script>
+</body>
+</html>

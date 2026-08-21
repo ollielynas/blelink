@@ -13,6 +13,7 @@ import android.graphics.Color
 import android.graphics.drawable.GradientDrawable
 import android.os.Build
 import android.os.Bundle
+import android.webkit.WebView
 import androidx.activity.result.contract.ActivityResultContracts
 import androidx.appcompat.app.AppCompatActivity
 import androidx.core.content.ContextCompat
@@ -66,7 +67,12 @@ class MainActivity : AppCompatActivity() {
     private val connectedDevices = ConcurrentHashMap<String, DeviceState>()
     private val photoReceiveStates = ConcurrentHashMap<String, PhotoReceiveState>()
     private val chatReceiveStates = ConcurrentHashMap<String, ChatReceiveState>()
+    private val musicQueueReceiveStates = ConcurrentHashMap<String, MusicReceiveState>()
     private var chatMsgIdCounter = 0
+
+    // YouTube video ids are always exactly this shape; validated before ever reaching the
+    // WebView's JS so a malicious "video id" can't break out of the evaluateJavascript() string.
+    private val youtubeIdPattern = Regex("^[A-Za-z0-9_-]{11}$")
 
     private val decodeExecutor = Executors.newSingleThreadExecutor()
     // Serializes chat relaying so a single browser never receives interleaved
@@ -100,8 +106,26 @@ class MainActivity : AppCompatActivity() {
         binding.photoRecyclerView.layoutManager = gridLayoutManager
         binding.photoRecyclerView.adapter = photoAdapter
 
+        setUpYoutubePlayer()
+
         showQrCode()
         requestPermissionsAndStart()
+    }
+
+    @SuppressLint("SetJavaScriptEnabled")
+    private fun setUpYoutubePlayer() {
+        val webView = binding.youtubePlayerWebView
+        webView.settings.javaScriptEnabled = true
+        webView.settings.domStorageEnabled = true
+        // Queued videos should autoplay one after another without requiring a tap each time.
+        webView.settings.mediaPlaybackRequiresUserGesture = false
+
+        // Loading straight from file:// gives the IFrame API a "Video player configuration
+        // error" (YouTube doesn't like embedding from an opaque file:// origin). Loading the
+        // same HTML with a real https base URL instead gives it a normal-looking third-party
+        // embedding origin, which is what the player actually expects.
+        val html = assets.open("youtube_player.html").bufferedReader().use { it.readText() }
+        webView.loadDataWithBaseURL("https://ollielynas.com", html, "text/html", "utf-8", null)
     }
 
     private fun showQrCode() {
@@ -247,6 +271,7 @@ class MainActivity : AppCompatActivity() {
                     connectedDevices.remove(device.address)
                     photoReceiveStates.remove(device.address)
                     chatReceiveStates.remove(device.address)
+                    musicQueueReceiveStates.remove(device.address)
                 }
             }
             updateStatusFromConnectionCount()
@@ -273,6 +298,9 @@ class MainActivity : AppCompatActivity() {
                     ChatProtocol.OP_CHAT_SEND -> handleChatStart(device, value)
                     ChatProtocol.OP_CHAT_SEND_DATA -> handleChatData(device, value)
                     ChatProtocol.OP_CHAT_SEND_END -> handleChatEnd(device, value)
+                    MusicProtocol.OP_MUSIC_QUEUE -> handleMusicQueueStart(device, value)
+                    MusicProtocol.OP_MUSIC_QUEUE_DATA -> handleMusicQueueData(device, value)
+                    MusicProtocol.OP_MUSIC_QUEUE_END -> handleMusicQueueEnd(device, value)
                 }
             }
             if (responseNeeded) {
@@ -401,32 +429,104 @@ class MainActivity : AppCompatActivity() {
         for ((address, state) in connectedDevices) {
             if (address == excludeAddress) continue
             if (!state.notificationsEnabled) continue
-            sendChatFrames(state.device, state.mtu, msgId, bytes)
+            sendFramedToDevice(
+                state.device, state.mtu,
+                ChatProtocol.OP_CHAT_RECV, ChatProtocol.OP_CHAT_RECV_DATA, ChatProtocol.OP_CHAT_RECV_END,
+                msgId, bytes
+            )
         }
     }
 
-    private fun sendChatFrames(device: BluetoothDevice, mtu: Int, msgId: Byte, bytes: ByteArray) {
-        // Chunk to the device's actual negotiated MTU when known, otherwise fall back to the
-        // guaranteed-safe unnegotiated default (23-byte ATT MTU, 3-byte header, so 20 usable).
-        val dataHeaderSize = 4 // opcode + msgId + seq(u16)
+    /**
+     * Chunked send of one id+bytes payload to a single device as opStart/opData/opEnd
+     * frames, sized to the device's actual negotiated MTU when known (falls back to the
+     * guaranteed-safe unnegotiated default: 23-byte ATT MTU, 3-byte header, 20 usable).
+     * Shared by chat relay and music search results.
+     */
+    private fun sendFramedToDevice(
+        device: BluetoothDevice,
+        mtu: Int,
+        opStart: Byte,
+        opData: Byte,
+        opEnd: Byte,
+        id: Byte,
+        bytes: ByteArray
+    ) {
+        val dataHeaderSize = 4 // opcode + id + seq(u16)
         val payloadSize = (mtu - 3 - dataHeaderSize).coerceAtLeast(1)
 
-        notifyDevice(device, ChatProtocol.buildRecvStart(msgId, bytes.size))
+        notifyDevice(device, buildLenFrame(opStart, id, bytes.size))
         var offset = 0
         var seq = 0
         while (offset < bytes.size) {
             val chunk = bytes.copyOfRange(offset, minOf(offset + payloadSize, bytes.size))
-            notifyDevice(device, ChatProtocol.buildRecvData(msgId, seq, chunk))
+            val frame = ByteArray(4 + chunk.size)
+            frame[0] = opData
+            frame[1] = id
+            frame[2] = ((seq shr 8) and 0xFF).toByte()
+            frame[3] = (seq and 0xFF).toByte()
+            chunk.copyInto(frame, 4)
+            notifyDevice(device, frame)
             offset += chunk.size
             seq++
         }
-        notifyDevice(device, ChatProtocol.buildRecvEnd(msgId, bytes.size))
+        notifyDevice(device, buildLenFrame(opEnd, id, bytes.size))
+    }
+
+    private fun buildLenFrame(opcode: Byte, id: Byte, totalLength: Int): ByteArray {
+        val frame = ByteArray(6)
+        frame[0] = opcode
+        frame[1] = id
+        frame[2] = ((totalLength shr 24) and 0xFF).toByte()
+        frame[3] = ((totalLength shr 16) and 0xFF).toByte()
+        frame[4] = ((totalLength shr 8) and 0xFF).toByte()
+        frame[5] = (totalLength and 0xFF).toByte()
+        return frame
     }
 
     @Synchronized
     private fun nextChatMsgId(): Byte {
         chatMsgIdCounter = (chatMsgIdCounter + 1) % 256
         return chatMsgIdCounter.toByte()
+    }
+
+    private fun handleMusicQueueStart(device: BluetoothDevice, value: ByteArray) {
+        val start = MusicProtocol.parseQueueStart(value) ?: return
+        if (start.totalLength > MusicProtocol.MAX_VIDEO_ID_BYTES) return
+        musicQueueReceiveStates[device.address] =
+            MusicReceiveState(start.msgId, start.totalLength, MusicProtocol.MAX_VIDEO_ID_BYTES)
+    }
+
+    private fun handleMusicQueueData(device: BluetoothDevice, value: ByteArray) {
+        val data = MusicProtocol.parseQueueData(value) ?: return
+        val state = musicQueueReceiveStates[device.address] ?: return
+        if (data.msgId != state.msgId) return
+        state.append(data.payload)
+    }
+
+    private fun handleMusicQueueEnd(device: BluetoothDevice, value: ByteArray) {
+        val end = MusicProtocol.parseQueueEnd(value) ?: return
+        val state = musicQueueReceiveStates[device.address] ?: return
+        if (end.msgId != state.msgId) return
+        musicQueueReceiveStates.remove(device.address)
+        if (state.buffer.size() != end.totalLength) return
+
+        val videoId = String(state.toByteArray(), Charsets.UTF_8)
+        if (!youtubeIdPattern.matches(videoId)) {
+            sendMusicQueueAck(device, end.msgId, MusicProtocol.QUEUE_STATUS_INVALID_ID)
+            return
+        }
+
+        runOnUiThread {
+            binding.youtubePlayerWebView.evaluateJavascript("addToQueue('$videoId')", null)
+        }
+        appendLog("queued video $videoId from ${device.address}")
+        sendMusicQueueAck(device, end.msgId, MusicProtocol.QUEUE_STATUS_OK)
+    }
+
+    @SuppressLint("MissingPermission")
+    private fun sendMusicQueueAck(device: BluetoothDevice, msgId: Byte, status: Byte) {
+        notifyDevice(device, MusicProtocol.buildQueueAck(msgId, status))
     }
 
     @SuppressLint("MissingPermission")

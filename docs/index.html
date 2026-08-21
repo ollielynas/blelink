@@ -288,10 +288,74 @@
     flex: 1;
   }
 
-  #chatSend {
+  .inline-btn {
     width: auto;
     padding: 10px 16px;
     background: var(--accent-2);
+  }
+
+  .music-results {
+    margin-top: 14px;
+    display: flex;
+    flex-direction: column;
+    gap: 8px;
+  }
+
+  .music-result {
+    display: flex;
+    align-items: center;
+    gap: 10px;
+    border: 2px solid var(--border);
+    border-radius: 10px;
+    padding: 8px 10px;
+    background: var(--card);
+  }
+
+  .music-result-thumb {
+    width: 48px;
+    height: 36px;
+    object-fit: cover;
+    border: 2px solid var(--border);
+    border-radius: 6px;
+    flex-shrink: 0;
+  }
+
+  .music-result-info {
+    flex: 1;
+    min-width: 0;
+  }
+
+  .music-result-name {
+    font-weight: 800;
+    font-size: 13px;
+    white-space: nowrap;
+    overflow: hidden;
+    text-overflow: ellipsis;
+  }
+
+  .music-result-artist {
+    font-size: 11px;
+    color: var(--muted);
+    white-space: nowrap;
+    overflow: hidden;
+    text-overflow: ellipsis;
+  }
+
+  .music-result button {
+    width: auto;
+    padding: 8px 12px;
+    font-size: 12px;
+    background: var(--accent-2);
+    box-shadow: 2px 2px 0 var(--border);
+    flex-shrink: 0;
+  }
+
+  .music-status {
+    margin-top: 10px;
+    font-size: 12px;
+    font-weight: 700;
+    color: var(--muted);
+    text-align: center;
   }
 </style>
 </head>
@@ -311,6 +375,7 @@
       <div class="menu-options">
         <button type="button" class="menu-btn" id="openPhotos">📷 Photos</button>
         <button type="button" class="menu-btn" id="openChat">💬 Group chat</button>
+        <button type="button" class="menu-btn" id="openMusic">🎵 Music</button>
       </div>
     </div>
 
@@ -345,9 +410,26 @@
         <div class="chat-messages" id="chatMessages"></div>
         <div class="chat-input-row">
           <input id="chatInput" class="text-input" type="text" placeholder="Message everyone…" maxlength="200" disabled />
-          <button id="chatSend" disabled>Send</button>
+          <button id="chatSend" class="inline-btn" disabled>Send</button>
         </div>
       </div>
+    </div>
+
+    <div id="musicScreen" hidden>
+      <div class="subheader">
+        <button type="button" class="back-btn" id="backFromMusic">← Back</button>
+        <span class="subheader-title">Music</span>
+      </div>
+
+      <p class="hint">Songs you queue <span class="accent-mark">play next</span> on the host's phone</p>
+
+      <div class="chat-input-row">
+        <input id="musicSearchInput" class="text-input" type="text" placeholder="Search a song or artist…" maxlength="100" />
+        <button id="musicSearchBtn" class="inline-btn">Search</button>
+      </div>
+
+      <div class="music-status" id="musicStatus"></div>
+      <div class="music-results" id="musicResults"></div>
     </div>
   </div>
 
@@ -375,6 +457,11 @@
     const OP_CHAT_RECV_DATA = 0x93;
     const OP_CHAT_RECV_END = 0x94;
 
+    const OP_MUSIC_QUEUE = 0x33;
+    const OP_MUSIC_QUEUE_DATA = 0x34;
+    const OP_MUSIC_QUEUE_END = 0x35;
+    const OP_MUSIC_QUEUE_ACK = 0x84;
+
     const ACK_STATUS_NAMES = {
       0x00: 'OK',
       0x01: 'ERR_LENGTH_MISMATCH',
@@ -382,6 +469,15 @@
       0x03: 'ERR_TOO_LARGE',
       0x04: 'ERR_TIMEOUT',
     };
+
+    const MUSIC_QUEUE_STATUS_NAMES = {
+      0x00: 'OK',
+      0x01: 'INVALID_ID',
+    };
+
+    // From console.cloud.google.com: enable "YouTube Data API v3", create an API key, and
+    // (recommended) restrict it by HTTP referrer to this site's domain.
+    const YOUTUBE_API_KEY = 'AIzaSyAyGvDwJ-KSSbcb_M68QFFYbtl7yrgWkbU';
 
     // Total BLE frame byte length (header + payload) per rung. Web Bluetooth exposes no
     // MTU query/negotiation API, so the effective size can only be discovered by trying a
@@ -419,14 +515,24 @@
     const chatInput = document.getElementById('chatInput');
     const chatSendBtn = document.getElementById('chatSend');
 
+    const musicScreenEl = document.getElementById('musicScreen');
+    const openMusicBtn = document.getElementById('openMusic');
+    const backFromMusicBtn = document.getElementById('backFromMusic');
+    const musicSearchInput = document.getElementById('musicSearchInput');
+    const musicSearchBtn = document.getElementById('musicSearchBtn');
+    const musicStatusEl = document.getElementById('musicStatus');
+    const musicResultsEl = document.getElementById('musicResults');
+
     let rxCharacteristic = null; // write to phone
     let device = null;
     let myName = null;
 
     let transferIdCounter = 0;
     let chatMsgIdCounter = 0;
+    let musicMsgIdCounter = 0;
     const pendingPhotoAcks = new Map(); // transferId -> { resolve, reject, timer }
     const pendingChatAcks = new Map(); // msgId -> { resolve, reject, timer }
+    const pendingQueueAcks = new Map(); // msgId -> { resolve, reject, timer }
     let chatRecvBuffer = null; // { msgId, expected, chunks: [] } for the in-flight incoming broadcast
 
     function log(line) {
@@ -453,18 +559,21 @@
       menuScreenEl.hidden = false;
       photoScreenEl.hidden = true;
       chatScreenEl.hidden = true;
+      musicScreenEl.hidden = true;
     }
 
     function showPhotos() {
       menuScreenEl.hidden = true;
       photoScreenEl.hidden = false;
       chatScreenEl.hidden = true;
+      musicScreenEl.hidden = true;
     }
 
     function showChat() {
       menuScreenEl.hidden = true;
       photoScreenEl.hidden = true;
       chatScreenEl.hidden = false;
+      musicScreenEl.hidden = true;
       // Once a name has been picked, skip straight to the chat body on every future visit.
       if (myName) {
         chatNameEntryEl.hidden = true;
@@ -477,10 +586,20 @@
       }
     }
 
+    function showMusic() {
+      menuScreenEl.hidden = true;
+      photoScreenEl.hidden = true;
+      chatScreenEl.hidden = true;
+      musicScreenEl.hidden = false;
+      musicSearchInput.focus();
+    }
+
     openPhotosBtn.addEventListener('click', showPhotos);
     openChatBtn.addEventListener('click', showChat);
+    openMusicBtn.addEventListener('click', showMusic);
     backFromPhotosBtn.addEventListener('click', showMenu);
     backFromChatBtn.addEventListener('click', showMenu);
+    backFromMusicBtn.addEventListener('click', showMenu);
 
     function joinChat() {
       const name = chatNameInput.value.trim();
@@ -544,7 +663,7 @@
       chatSendBtn.disabled = true;
       rxCharacteristic = null;
       chatRecvBuffer = null;
-      for (const map of [pendingPhotoAcks, pendingChatAcks]) {
+      for (const map of [pendingPhotoAcks, pendingChatAcks, pendingQueueAcks]) {
         for (const [, entry] of map) {
           clearTimeout(entry.timer);
           entry.reject(new Error('disconnected'));
@@ -553,7 +672,7 @@
       }
     }
 
-    function handleAck(value, pendingMap) {
+    function handleAck(value, pendingMap, statusNames) {
       if (value.length < 3) return;
       const id = value[1];
       const status = value[2];
@@ -564,7 +683,7 @@
       if (status === 0x00) {
         entry.resolve();
       } else {
-        entry.reject(new Error(ACK_STATUS_NAMES[status] || `unknown status ${status}`));
+        entry.reject(new Error((statusNames || ACK_STATUS_NAMES)[status] || `unknown status ${status}`));
       }
     }
 
@@ -615,6 +734,8 @@
         const senderName = sep >= 0 ? raw.slice(0, sep) : 'Guest';
         const messageText = sep >= 0 ? raw.slice(sep + 1) : raw;
         addChatBubble(senderName, messageText, false);
+      } else if (opcode === OP_MUSIC_QUEUE_ACK) {
+        handleAck(value, pendingQueueAcks, MUSIC_QUEUE_STATUS_NAMES);
       }
     }
 
@@ -636,6 +757,11 @@
     function nextChatMsgId() {
       chatMsgIdCounter = (chatMsgIdCounter + 1) % 256;
       return chatMsgIdCounter;
+    }
+
+    function nextMusicMsgId() {
+      musicMsgIdCounter = (musicMsgIdCounter + 1) % 256;
+      return musicMsgIdCounter;
     }
 
     function buildStartFrame(opcode, id, totalLength) {
@@ -797,6 +923,125 @@
     chatSendBtn.addEventListener('click', sendChatMessage);
     chatInput.addEventListener('keydown', (e) => {
       if (e.key === 'Enter') sendChatMessage();
+    });
+
+    // Search runs entirely client-side against YouTube's public Data API — no BLE needed,
+    // works even before connecting to the phone. Only queueing a chosen video needs BLE.
+    async function searchYouTube(query) {
+      const url = 'https://www.googleapis.com/youtube/v3/search?part=snippet&type=video'
+        + `&maxResults=8&q=${encodeURIComponent(query)}&key=${YOUTUBE_API_KEY}`;
+      const res = await fetch(url);
+      if (!res.ok) {
+        throw new Error(`youtube search failed: HTTP ${res.status}`);
+      }
+      const json = await res.json();
+      return (json.items || []).map((item) => ({
+        videoId: item.id.videoId,
+        title: item.snippet.title,
+        channel: item.snippet.channelTitle,
+        thumbnail: item.snippet.thumbnails && item.snippet.thumbnails.default
+          ? item.snippet.thumbnails.default.url
+          : null,
+      }));
+    }
+
+    async function queueVideo(videoId) {
+      const bytes = new TextEncoder().encode(videoId);
+      const msgId = nextMusicMsgId();
+      await sendChunked(OP_MUSIC_QUEUE, OP_MUSIC_QUEUE_DATA, OP_MUSIC_QUEUE_END, msgId, bytes);
+      await waitForAckIn(pendingQueueAcks, msgId);
+    }
+
+    function setMusicStatus(text) {
+      musicStatusEl.textContent = text || '';
+    }
+
+    function friendlyQueueError(statusName) {
+      if (statusName === 'INVALID_ID') return 'That video could not be queued — try a different one.';
+      if (statusName === 'ack timeout') return 'No response from the phone — try again.';
+      if (statusName === 'disconnected') return 'Disconnected from the phone — reconnect and try again.';
+      return 'Could not queue that song — try again.';
+    }
+
+    function renderMusicResults(videos) {
+      musicResultsEl.innerHTML = '';
+      for (const video of videos) {
+        const row = document.createElement('div');
+        row.className = 'music-result';
+
+        if (video.thumbnail) {
+          const img = document.createElement('img');
+          img.className = 'music-result-thumb';
+          img.src = video.thumbnail;
+          img.alt = '';
+          row.appendChild(img);
+        }
+
+        const info = document.createElement('div');
+        info.className = 'music-result-info';
+        const nameEl = document.createElement('div');
+        nameEl.className = 'music-result-name';
+        nameEl.textContent = video.title;
+        const artistEl = document.createElement('div');
+        artistEl.className = 'music-result-artist';
+        artistEl.textContent = video.channel;
+        info.appendChild(nameEl);
+        info.appendChild(artistEl);
+
+        const queueBtn = document.createElement('button');
+        queueBtn.type = 'button';
+        queueBtn.textContent = 'Queue';
+        queueBtn.addEventListener('click', () => queueSelected(video.videoId, queueBtn));
+
+        row.appendChild(info);
+        row.appendChild(queueBtn);
+        musicResultsEl.appendChild(row);
+      }
+    }
+
+    async function queueSelected(videoId, btn) {
+      if (!rxCharacteristic) {
+        setMusicStatus('Connect to the phone first to queue songs.');
+        return;
+      }
+      btn.disabled = true;
+      btn.textContent = '…';
+      try {
+        await queueVideo(videoId);
+        btn.textContent = 'Added ✓';
+        setMusicStatus('Added to the queue!');
+      } catch (err) {
+        btn.disabled = false;
+        btn.textContent = 'Queue';
+        setMusicStatus(friendlyQueueError(err.message));
+      }
+    }
+
+    async function performSearch() {
+      const query = musicSearchInput.value.trim();
+      if (!query) return;
+      musicSearchBtn.disabled = true;
+      musicResultsEl.innerHTML = '';
+      setMusicStatus('Searching…');
+      try {
+        const results = await searchYouTube(query);
+        if (results.length === 0) {
+          setMusicStatus('No results — try a different search.');
+        } else {
+          setMusicStatus('');
+          renderMusicResults(results);
+        }
+      } catch (err) {
+        setMusicStatus('Search failed — try again.');
+        log('youtube search failed: ' + err.message);
+      } finally {
+        musicSearchBtn.disabled = false;
+      }
+    }
+
+    musicSearchBtn.addEventListener('click', performSearch);
+    musicSearchInput.addEventListener('keydown', (e) => {
+      if (e.key === 'Enter') performSearch();
     });
   </script>
 </body>
