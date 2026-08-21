@@ -500,6 +500,9 @@
     const OP_MUSIC_SYNC_DATA = 0xB4;
     const OP_MUSIC_SYNC_END = 0xB5;
 
+    const OP_MUSIC_PING = 0xB6;
+    const OP_MUSIC_PONG = 0xB7;
+
     const ACK_STATUS_NAMES = {
       0x00: 'OK',
       0x01: 'ERR_LENGTH_MISMATCH',
@@ -587,10 +590,18 @@
     let pendingSyncState = null;
     let audioSyncEnabled = false;
     const SYNC_DRIFT_THRESHOLD_SECONDS = 0.75;
-    // A broadcast is always a little stale by the time it's applied (BLE transit + JS
-    // overhead), so guests land slightly behind the true position — nudge forward to
-    // compensate for that systematic lag rather than just correcting random jitter.
-    const SYNC_LATENCY_COMPENSATION_SECONDS = 0.25;
+
+    // Measured (not guessed) one-way transport latency, via periodic ping/pong round-trips —
+    // see startPingLoop(). Starts at 0 (no compensation) until the first ping resolves.
+    let estimatedLatencySeconds = 0;
+    let pingIdCounter = 0;
+    let pingLoopHandle = null;
+    const pendingPings = new Map(); // pingId -> { resolve, sentAt, timer }
+    const PING_INTERVAL_MS = 10_000;
+    const PING_TIMEOUT_MS = 3_000;
+    // Exponential moving average weight for new samples — smooths out one-off BLE hiccups
+    // without making the estimate too slow to track a real, sustained change.
+    const PING_SMOOTHING = 0.3;
 
     function log(line) {
       console.log(line);
@@ -722,6 +733,8 @@
       chatRecvBuffer = null;
       musicQueueRecvBuffer = null;
       musicSyncRecvBuffer = null;
+      stopPingLoop();
+      estimatedLatencySeconds = 0;
       for (const map of [pendingPhotoAcks, pendingChatAcks, pendingQueueAcks]) {
         for (const [, entry] of map) {
           clearTimeout(entry.timer);
@@ -849,6 +862,19 @@
         } catch (err) {
           // malformed sync payload — ignore
         }
+      } else if (opcode === OP_MUSIC_PONG) {
+        if (value.length < 2) return;
+        const id = value[1];
+        const entry = pendingPings.get(id);
+        if (!entry) return;
+        pendingPings.delete(id);
+        clearTimeout(entry.timer);
+        const rttMs = performance.now() - entry.sentAt;
+        const oneWaySeconds = (rttMs / 2) / 1000;
+        estimatedLatencySeconds = estimatedLatencySeconds === 0
+          ? oneWaySeconds
+          : estimatedLatencySeconds * (1 - PING_SMOOTHING) + oneWaySeconds * PING_SMOOTHING;
+        entry.resolve();
       }
     }
 
@@ -1202,12 +1228,14 @@
         syncPlayerReady = false;
         syncCurrentVideoId = null;
         pendingSyncState = null;
+        stopPingLoop();
         return;
       }
 
       audioSyncEnabled = true;
       joinAudioBtn.textContent = '🔇 Leave Audio';
       syncPlayerContainer.hidden = false;
+      startPingLoop();
 
       if (window.YT && window.YT.Player) {
         createSyncPlayer();
@@ -1220,6 +1248,46 @@
         tag.src = 'https://www.youtube.com/iframe_api';
         document.head.appendChild(tag);
       }
+    }
+
+    function nextPingId() {
+      pingIdCounter = (pingIdCounter + 1) % 256;
+      return pingIdCounter;
+    }
+
+    async function sendPing() {
+      if (!rxCharacteristic) return;
+      const id = nextPingId();
+      const sentAt = performance.now();
+      const settled = new Promise((resolve) => {
+        const timer = setTimeout(() => {
+          pendingPings.delete(id);
+          resolve();
+        }, PING_TIMEOUT_MS);
+        pendingPings.set(id, { sentAt, timer, resolve });
+      });
+      try {
+        await rxCharacteristic.writeValueWithResponse(new Uint8Array([OP_MUSIC_PING, id]));
+      } catch (err) {
+        pendingPings.delete(id);
+        return;
+      }
+      await settled; // the OP_MUSIC_PONG handler resolves this (or the timeout does)
+    }
+
+    function startPingLoop() {
+      if (pingLoopHandle) return;
+      sendPing();
+      pingLoopHandle = setInterval(sendPing, PING_INTERVAL_MS);
+    }
+
+    function stopPingLoop() {
+      if (pingLoopHandle) {
+        clearInterval(pingLoopHandle);
+        pingLoopHandle = null;
+      }
+      for (const [, entry] of pendingPings) clearTimeout(entry.timer);
+      pendingPings.clear();
     }
 
     function createSyncPlayer() {
@@ -1254,7 +1322,7 @@
     function applySyncState(videoId, position, playing) {
       if (!audioSyncEnabled) return;
       if (!videoId) return;
-      const targetPosition = playing ? position + SYNC_LATENCY_COMPENSATION_SECONDS : position;
+      const targetPosition = playing ? position + estimatedLatencySeconds : position;
       if (!syncPlayerReady || !syncPlayer) {
         pendingSyncState = { v: videoId, p: position, pl: playing };
         return;

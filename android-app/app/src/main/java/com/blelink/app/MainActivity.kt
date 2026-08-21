@@ -357,6 +357,7 @@ class MainActivity : AppCompatActivity() {
                     MusicProtocol.OP_MUSIC_QUEUE -> handleMusicQueueStart(device, value)
                     MusicProtocol.OP_MUSIC_QUEUE_DATA -> handleMusicQueueData(device, value)
                     MusicProtocol.OP_MUSIC_QUEUE_END -> handleMusicQueueEnd(device, value)
+                    MusicProtocol.OP_MUSIC_PING -> handleMusicPing(device, value)
                 }
             }
             if (responseNeeded) {
@@ -606,6 +607,14 @@ class MainActivity : AppCompatActivity() {
     @SuppressLint("MissingPermission")
     private fun sendMusicQueueAck(device: BluetoothDevice, msgId: Byte, status: Byte) {
         notifyDevice(device, MusicProtocol.buildQueueAck(msgId, status))
+    }
+
+    /** Echoes a sync-latency ping straight back with no processing delay, so the round-trip
+     *  time a browser measures reflects transport latency, not app work. */
+    private fun handleMusicPing(device: BluetoothDevice, value: ByteArray) {
+        if (value.size < 2) return
+        val pingId = value[1]
+        notifyDevice(device, byteArrayOf(MusicProtocol.OP_MUSIC_PONG, pingId))
     }
 
     @SuppressLint("MissingPermission")

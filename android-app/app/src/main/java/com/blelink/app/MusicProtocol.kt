@@ -30,6 +30,13 @@ import java.io.ByteArrayOutputStream
  *   MUSIC_SYNC      = (opcode, msgId, totalLength: u32 BE)
  *   MUSIC_SYNC_DATA = (opcode, msgId, seq: u16 BE, payload...)
  *   MUSIC_SYNC_END  = (opcode, msgId, totalLength: u32 BE)
+ *
+ * Browser -> phone -> browser (single-frame, no chunking needed): a browser periodically
+ * pings while audio sync is on, the phone echoes it back immediately with no processing
+ * delay, and the browser uses the round-trip time to estimate one-way transport latency —
+ * a measured number to nudge sync position by, instead of a guessed constant.
+ *   MUSIC_PING = (opcode, pingId)   browser -> phone
+ *   MUSIC_PONG = (opcode, pingId)   phone -> browser, echoed back unchanged
  */
 object MusicProtocol {
     const val OP_MUSIC_QUEUE: Byte = 0x33
@@ -45,6 +52,9 @@ object MusicProtocol {
     const val OP_MUSIC_SYNC: Byte = 0xB3.toByte()
     const val OP_MUSIC_SYNC_DATA: Byte = 0xB4.toByte()
     const val OP_MUSIC_SYNC_END: Byte = 0xB5.toByte()
+
+    const val OP_MUSIC_PING: Byte = 0xB6.toByte()
+    const val OP_MUSIC_PONG: Byte = 0xB7.toByte()
 
     const val QUEUE_STATUS_OK: Byte = 0x00
     const val QUEUE_STATUS_INVALID_ID: Byte = 0x01
