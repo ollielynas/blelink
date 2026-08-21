@@ -3,7 +3,7 @@
     <string name="app_name">BleLink</string>
     <string name="status_starting">Starting…</string>
     <string name="scan_to_join">Scan to join</string>
-    <string name="scan_to_join_subtitle">Open the page and send a photo</string>
+    <string name="scan_to_join_subtitle">Queue music and upload photos</string>
     <string name="live_gallery">Live gallery</string>
     <string name="empty_gallery">No photos yet — waiting for someone to send one</string>
     <string name="gallery_photo_description">Received photo</string>
