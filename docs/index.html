@@ -582,7 +582,7 @@
     // Guest-side sync player state (only active once the "Join Audio" toggle is on).
     let syncPlayer = null;
     let syncPlayerReady = false;
-    let syncApiLoading = false;
+    let ytApiRequested = false; // the youtube.com/iframe_api script only ever needs fetching once
     let syncCurrentVideoId = null;
     let pendingSyncState = null;
     let audioSyncEnabled = false;
@@ -1192,7 +1192,16 @@
         audioSyncEnabled = false;
         joinAudioBtn.textContent = '🔊 Join Audio';
         syncPlayerContainer.hidden = true;
-        if (syncPlayerReady && syncPlayer) syncPlayer.pauseVideo();
+        // Fully tear down the player/iframe rather than just hiding it — nothing should
+        // keep running (or keep an iframe sitting in the DOM) while not connected to audio.
+        if (syncPlayer) {
+          syncPlayer.destroy();
+          syncPlayer = null;
+        }
+        syncPlayerContainer.innerHTML = '';
+        syncPlayerReady = false;
+        syncCurrentVideoId = null;
+        pendingSyncState = null;
         return;
       }
 
@@ -1200,14 +1209,12 @@
       joinAudioBtn.textContent = '🔇 Leave Audio';
       syncPlayerContainer.hidden = false;
 
-      if (syncApiLoading) {
-        if (syncPlayerReady && syncPlayer) syncPlayer.playVideo();
-        return;
-      }
-      syncApiLoading = true;
       if (window.YT && window.YT.Player) {
         createSyncPlayer();
-      } else {
+      } else if (!ytApiRequested) {
+        // The external iframe_api script only needs to be fetched once per page load;
+        // onYouTubeIframeAPIReady fires when it's ready and creates the player then.
+        ytApiRequested = true;
         window.onYouTubeIframeAPIReady = createSyncPlayer;
         const tag = document.createElement('script');
         tag.src = 'https://www.youtube.com/iframe_api';
@@ -1216,7 +1223,19 @@
     }
 
     function createSyncPlayer() {
-      syncPlayer = new YT.Player('syncPlayerContainer', {
+      // Guards a race where the API script finishes loading after the user already toggled
+      // audio sync back off — don't spin up a player nobody wants anymore.
+      if (!audioSyncEnabled) return;
+
+      const inner = document.createElement('div');
+      inner.id = 'syncPlayerInner';
+      syncPlayerContainer.innerHTML = '';
+      syncPlayerContainer.appendChild(inner);
+
+      // YT.Player replaces the element it's given (by id) with its iframe, which would
+      // orphan our cached syncPlayerContainer reference if targeted directly — so it always
+      // targets this fresh inner div instead, leaving the stable wrapper alone.
+      syncPlayer = new YT.Player('syncPlayerInner', {
         height: '100%',
         width: '100%',
         playerVars: { playsinline: 1, controls: 1, rel: 0 },
