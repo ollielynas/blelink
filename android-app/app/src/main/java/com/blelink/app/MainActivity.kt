@@ -42,8 +42,7 @@ class MainActivity : AppCompatActivity() {
         val TX_CHAR_UUID: UUID = UUID.fromString("6e400003-b5a3-f393-e0a9-e50e24dcca9e") // notify (phone -> central)
         val CCCD_UUID: UUID = UUID.fromString("00002902-0000-1000-8000-00805f9b34fb")
 
-        // Fill in once GitHub Pages is live for this repo.
-        const val WEB_URL = "https://example.github.io/adb-device-perif/"
+        const val WEB_URL = "https://ollielynas.com/blelink/"
 
         const val BLE_DEVICE_NAME = "BleLink"
     }

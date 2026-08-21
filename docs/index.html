@@ -64,10 +64,13 @@
     margin: 0;
   }
 
-  h1 .accent-mark {
+  .accent-mark {
     background: var(--accent);
     color: var(--on-accent);
     padding: 0 4px;
+  }
+
+  h1 .accent-mark {
     margin-left: -2px;
   }
 
@@ -198,9 +201,11 @@
   }
 
   .hint {
-    font-size: 13px;
-    color: var(--muted);
-    margin: 0 0 10px;
+    font-size: 17px;
+    font-weight: 800;
+    color: var(--ink);
+    margin: 0 0 14px;
+    line-height: 1.3;
   }
 
   .text-input {
@@ -331,7 +336,7 @@
       </div>
 
       <div id="chatNameEntry">
-        <p class="hint">Pick a name to join the group chat</p>
+        <p class="hint"><span class="accent-mark">Pick a name</span> to join the group chat</p>
         <input id="chatNameInput" class="text-input" type="text" placeholder="Your name" maxlength="30" />
         <button id="chatNameContinue">Join chat</button>
       </div>
