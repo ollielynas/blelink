@@ -142,7 +142,7 @@ class MainActivity : AppCompatActivity() {
      * in step. BLE latency and per-guest buffering make tighter sync impractical.
      */
     private fun startMusicSyncLoop() {
-        val intervalMs = 5_000L
+        val intervalMs = 2_000L
         val loop = object : Runnable {
             override fun run() {
                 binding.youtubePlayerWebView.evaluateJavascript("JSON.stringify(getPlaybackState())") { rawJson ->

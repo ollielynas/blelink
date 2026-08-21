@@ -579,13 +579,18 @@
     let musicQueueRecvBuffer = null; // same shape, for the in-flight incoming "queued" relay
     let musicSyncRecvBuffer = null; // same shape, for the in-flight incoming sync-state broadcast
 
-    // Guest-side sync player state (only used once "Join Audio" is tapped).
+    // Guest-side sync player state (only active once the "Join Audio" toggle is on).
     let syncPlayer = null;
     let syncPlayerReady = false;
     let syncApiLoading = false;
     let syncCurrentVideoId = null;
     let pendingSyncState = null;
-    const SYNC_DRIFT_THRESHOLD_SECONDS = 1.5;
+    let audioSyncEnabled = false;
+    const SYNC_DRIFT_THRESHOLD_SECONDS = 0.75;
+    // A broadcast is always a little stale by the time it's applied (BLE transit + JS
+    // overhead), so guests land slightly behind the true position — nudge forward to
+    // compensate for that systematic lag rather than just correcting random jitter.
+    const SYNC_LATENCY_COMPENSATION_SECONDS = 0.25;
 
     function log(line) {
       console.log(line);
@@ -1177,14 +1182,28 @@
       if (e.key === 'Enter') performSearch();
     });
 
-    // "Join Audio" plays the same video the phone is playing, in this browser's own tab,
-    // resyncing every few seconds from the phone's broadcasts. It's approximate, not
-    // sample-accurate — BLE latency and independent buffering rule that out — and browsers
-    // require a tap before they'll let a video start with sound, hence the explicit button.
-    function joinAudio() {
-      joinAudioBtn.hidden = true;
+    // "Join Audio" toggles playing the same video the phone is playing, in this browser's
+    // own tab, resyncing every couple of seconds from the phone's broadcasts. It's
+    // approximate, not sample-accurate — BLE latency and independent buffering rule that
+    // out — and browsers require a tap before they'll let a video start with sound, hence
+    // the explicit toggle rather than joining automatically.
+    function toggleAudioSync() {
+      if (audioSyncEnabled) {
+        audioSyncEnabled = false;
+        joinAudioBtn.textContent = '🔊 Join Audio';
+        syncPlayerContainer.hidden = true;
+        if (syncPlayerReady && syncPlayer) syncPlayer.pauseVideo();
+        return;
+      }
+
+      audioSyncEnabled = true;
+      joinAudioBtn.textContent = '🔇 Leave Audio';
       syncPlayerContainer.hidden = false;
-      if (syncApiLoading) return;
+
+      if (syncApiLoading) {
+        if (syncPlayerReady && syncPlayer) syncPlayer.playVideo();
+        return;
+      }
       syncApiLoading = true;
       if (window.YT && window.YT.Player) {
         createSyncPlayer();
@@ -1214,26 +1233,28 @@
     }
 
     function applySyncState(videoId, position, playing) {
+      if (!audioSyncEnabled) return;
       if (!videoId) return;
+      const targetPosition = playing ? position + SYNC_LATENCY_COMPENSATION_SECONDS : position;
       if (!syncPlayerReady || !syncPlayer) {
         pendingSyncState = { v: videoId, p: position, pl: playing };
         return;
       }
       if (videoId !== syncCurrentVideoId) {
         syncCurrentVideoId = videoId;
-        syncPlayer.loadVideoById({ videoId, startSeconds: position });
+        syncPlayer.loadVideoById({ videoId, startSeconds: targetPosition });
         if (!playing) syncPlayer.pauseVideo();
         return;
       }
       const current = syncPlayer.getCurrentTime();
-      if (Math.abs(current - position) > SYNC_DRIFT_THRESHOLD_SECONDS) {
-        syncPlayer.seekTo(position, true);
+      if (Math.abs(current - targetPosition) > SYNC_DRIFT_THRESHOLD_SECONDS) {
+        syncPlayer.seekTo(targetPosition, true);
       }
       if (playing) syncPlayer.playVideo();
       else syncPlayer.pauseVideo();
     }
 
-    joinAudioBtn.addEventListener('click', joinAudio);
+    joinAudioBtn.addEventListener('click', toggleAudioSync);
   </script>
 </body>
 </html>
