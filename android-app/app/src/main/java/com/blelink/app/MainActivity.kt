@@ -21,6 +21,7 @@ import androidx.recyclerview.widget.GridLayoutManager
 import com.blelink.app.databinding.ActivityMainBinding
 import com.google.zxing.BarcodeFormat
 import com.google.zxing.qrcode.QRCodeWriter
+import org.json.JSONObject
 import java.util.UUID
 import java.util.concurrent.ConcurrentHashMap
 import java.util.concurrent.Executors
@@ -69,6 +70,7 @@ class MainActivity : AppCompatActivity() {
     private val chatReceiveStates = ConcurrentHashMap<String, ChatReceiveState>()
     private val musicQueueReceiveStates = ConcurrentHashMap<String, MusicReceiveState>()
     private var chatMsgIdCounter = 0
+    private var musicMsgIdCounter = 0
 
     // YouTube video ids are always exactly this shape; validated before ever reaching the
     // WebView's JS so a malicious "video id" can't break out of the evaluateJavascript() string.
@@ -490,11 +492,17 @@ class MainActivity : AppCompatActivity() {
         return chatMsgIdCounter.toByte()
     }
 
+    @Synchronized
+    private fun nextMusicMsgId(): Byte {
+        musicMsgIdCounter = (musicMsgIdCounter + 1) % 256
+        return musicMsgIdCounter.toByte()
+    }
+
     private fun handleMusicQueueStart(device: BluetoothDevice, value: ByteArray) {
         val start = MusicProtocol.parseQueueStart(value) ?: return
-        if (start.totalLength > MusicProtocol.MAX_VIDEO_ID_BYTES) return
+        if (start.totalLength > MusicProtocol.MAX_QUEUE_PAYLOAD_BYTES) return
         musicQueueReceiveStates[device.address] =
-            MusicReceiveState(start.msgId, start.totalLength, MusicProtocol.MAX_VIDEO_ID_BYTES)
+            MusicReceiveState(start.msgId, start.totalLength, MusicProtocol.MAX_QUEUE_PAYLOAD_BYTES)
     }
 
     private fun handleMusicQueueData(device: BluetoothDevice, value: ByteArray) {
@@ -511,7 +519,12 @@ class MainActivity : AppCompatActivity() {
         musicQueueReceiveStates.remove(device.address)
         if (state.buffer.size() != end.totalLength) return
 
-        val videoId = String(state.toByteArray(), Charsets.UTF_8)
+        val payloadBytes = state.toByteArray()
+        val videoId = try {
+            JSONObject(String(payloadBytes, Charsets.UTF_8)).optString("v", "")
+        } catch (e: Exception) {
+            ""
+        }
         if (!youtubeIdPattern.matches(videoId)) {
             sendMusicQueueAck(device, end.msgId, MusicProtocol.QUEUE_STATUS_INVALID_ID)
             return
@@ -522,6 +535,18 @@ class MainActivity : AppCompatActivity() {
         }
         appendLog("queued video $videoId from ${device.address}")
         sendMusicQueueAck(device, end.msgId, MusicProtocol.QUEUE_STATUS_OK)
+
+        // Relay the same title/channel payload to every connected browser (including the
+        // sender) so everyone's "recently queued" list stays in sync.
+        val broadcastId = nextMusicMsgId()
+        for (recipient in connectedDevices.values) {
+            if (!recipient.notificationsEnabled) continue
+            sendFramedToDevice(
+                recipient.device, recipient.mtu,
+                MusicProtocol.OP_MUSIC_QUEUE_RECV, MusicProtocol.OP_MUSIC_QUEUE_RECV_DATA, MusicProtocol.OP_MUSIC_QUEUE_RECV_END,
+                broadcastId, payloadBytes
+            )
+        }
     }
 
     @SuppressLint("MissingPermission")

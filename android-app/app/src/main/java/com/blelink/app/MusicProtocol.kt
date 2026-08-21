@@ -5,17 +5,24 @@ import java.io.ByteArrayOutputStream
 /**
  * Wire protocol for queueing a YouTube video to play on the phone, layered on the same
  * RX/TX characteristics as photos and chat. Search happens entirely client-side in the
- * browser (a direct call to the YouTube Data API), so the only thing that needs to cross
- * BLE is the chosen video's id. Frame shapes mirror ChatProtocol (opcode, id, u32 BE length
- * for START/END; opcode, id, u16 BE seq, payload for DATA).
+ * browser (a direct call to the YouTube Data API); what crosses BLE is a small JSON blob
+ * with the chosen video's id, title, and channel — id drives playback, title/channel are
+ * opaque display text relayed back out so every guest's page can show a shared queue list.
+ * Frame shapes mirror ChatProtocol (opcode, id, u32 BE length for START/END; opcode, id,
+ * u16 BE seq, payload for DATA).
  *
- * Browser -> phone (queue a chosen video by id):
+ * Browser -> phone (queue a chosen video; payload is JSON {"v":id,"t":title,"c":channel}):
  *   MUSIC_QUEUE      = (opcode, msgId, totalLength: u32 BE)
  *   MUSIC_QUEUE_DATA = (opcode, msgId, seq: u16 BE, payload...)
  *   MUSIC_QUEUE_END  = (opcode, msgId, totalLength: u32 BE)
  *
  * Phone -> requesting browser only:
  *   MUSIC_QUEUE_ACK = (opcode, msgId, status)
+ *
+ * Phone -> every connected browser (relay, same JSON payload, so everyone's queue list stays in sync):
+ *   MUSIC_QUEUE_RECV      = (opcode, msgId, totalLength: u32 BE)
+ *   MUSIC_QUEUE_RECV_DATA = (opcode, msgId, seq: u16 BE, payload...)
+ *   MUSIC_QUEUE_RECV_END  = (opcode, msgId, totalLength: u32 BE)
  */
 object MusicProtocol {
     const val OP_MUSIC_QUEUE: Byte = 0x33
@@ -24,11 +31,16 @@ object MusicProtocol {
 
     const val OP_MUSIC_QUEUE_ACK: Byte = 0x84.toByte()
 
+    const val OP_MUSIC_QUEUE_RECV: Byte = 0xB0.toByte()
+    const val OP_MUSIC_QUEUE_RECV_DATA: Byte = 0xB1.toByte()
+    const val OP_MUSIC_QUEUE_RECV_END: Byte = 0xB2.toByte()
+
     const val QUEUE_STATUS_OK: Byte = 0x00
     const val QUEUE_STATUS_INVALID_ID: Byte = 0x01
 
-    // YouTube video ids are always exactly 11 chars; a little slack is harmless.
-    const val MAX_VIDEO_ID_BYTES = 32
+    // JSON {"v":id,"t":title,"c":channel} — title/channel can run a bit long, so give this
+    // more room than a bare 11-char video id would need.
+    const val MAX_QUEUE_PAYLOAD_BYTES = 500
 
     data class LenFrame(val msgId: Byte, val totalLength: Int)
     data class DataFrame(val msgId: Byte, val seq: Int, val payload: ByteArray)

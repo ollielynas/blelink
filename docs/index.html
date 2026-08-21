@@ -357,6 +357,15 @@
     color: var(--muted);
     text-align: center;
   }
+
+  .list-label {
+    margin: 18px 0 8px;
+    font-size: 11px;
+    font-weight: 800;
+    text-transform: uppercase;
+    letter-spacing: 0.06em;
+    color: var(--muted);
+  }
 </style>
 </head>
 <body>
@@ -430,6 +439,9 @@
 
       <div class="music-status" id="musicStatus"></div>
       <div class="music-results" id="musicResults"></div>
+
+      <p class="list-label">Recently queued</p>
+      <div class="music-results" id="musicQueueList"></div>
     </div>
   </div>
 
@@ -461,6 +473,10 @@
     const OP_MUSIC_QUEUE_DATA = 0x34;
     const OP_MUSIC_QUEUE_END = 0x35;
     const OP_MUSIC_QUEUE_ACK = 0x84;
+
+    const OP_MUSIC_QUEUE_RECV = 0xB0;
+    const OP_MUSIC_QUEUE_RECV_DATA = 0xB1;
+    const OP_MUSIC_QUEUE_RECV_END = 0xB2;
 
     const ACK_STATUS_NAMES = {
       0x00: 'OK',
@@ -522,6 +538,8 @@
     const musicSearchBtn = document.getElementById('musicSearchBtn');
     const musicStatusEl = document.getElementById('musicStatus');
     const musicResultsEl = document.getElementById('musicResults');
+    const musicQueueListEl = document.getElementById('musicQueueList');
+    const MAX_QUEUE_LIST_ITEMS = 20;
 
     let rxCharacteristic = null; // write to phone
     let device = null;
@@ -534,6 +552,7 @@
     const pendingChatAcks = new Map(); // msgId -> { resolve, reject, timer }
     const pendingQueueAcks = new Map(); // msgId -> { resolve, reject, timer }
     let chatRecvBuffer = null; // { msgId, expected, chunks: [] } for the in-flight incoming broadcast
+    let musicQueueRecvBuffer = null; // same shape, for the in-flight incoming "queued" relay
 
     function log(line) {
       console.log(line);
@@ -663,6 +682,7 @@
       chatSendBtn.disabled = true;
       rxCharacteristic = null;
       chatRecvBuffer = null;
+      musicQueueRecvBuffer = null;
       for (const map of [pendingPhotoAcks, pendingChatAcks, pendingQueueAcks]) {
         for (const [, entry] of map) {
           clearTimeout(entry.timer);
@@ -736,6 +756,33 @@
         addChatBubble(senderName, messageText, false);
       } else if (opcode === OP_MUSIC_QUEUE_ACK) {
         handleAck(value, pendingQueueAcks, MUSIC_QUEUE_STATUS_NAMES);
+      } else if (opcode === OP_MUSIC_QUEUE_RECV) {
+        const { id, length } = parseLenFrame(value);
+        musicQueueRecvBuffer = { msgId: id, expected: length, chunks: [] };
+      } else if (opcode === OP_MUSIC_QUEUE_RECV_DATA) {
+        if (!musicQueueRecvBuffer) return;
+        const { id, payload } = parseDataFrame(value);
+        if (id !== musicQueueRecvBuffer.msgId) return;
+        musicQueueRecvBuffer.chunks.push(payload);
+      } else if (opcode === OP_MUSIC_QUEUE_RECV_END) {
+        if (!musicQueueRecvBuffer) return;
+        const { id } = parseLenFrame(value);
+        const buffered = musicQueueRecvBuffer;
+        musicQueueRecvBuffer = null;
+        if (id !== buffered.msgId) return;
+        const totalLen = buffered.chunks.reduce((n, c) => n + c.length, 0);
+        const merged = new Uint8Array(totalLen);
+        let off = 0;
+        for (const chunk of buffered.chunks) {
+          merged.set(chunk, off);
+          off += chunk.length;
+        }
+        try {
+          const info = JSON.parse(new TextDecoder().decode(merged));
+          addQueueListItem(info.t || 'Unknown title', info.c || '');
+        } catch (err) {
+          // malformed relay payload — ignore
+        }
       }
     }
 
@@ -945,8 +992,9 @@
       }));
     }
 
-    async function queueVideo(videoId) {
-      const bytes = new TextEncoder().encode(videoId);
+    async function queueVideo(videoId, title, channel) {
+      const payload = JSON.stringify({ v: videoId, t: title || '', c: channel || '' });
+      const bytes = new TextEncoder().encode(payload);
       const msgId = nextMusicMsgId();
       await sendChunked(OP_MUSIC_QUEUE, OP_MUSIC_QUEUE_DATA, OP_MUSIC_QUEUE_END, msgId, bytes);
       await waitForAckIn(pendingQueueAcks, msgId);
@@ -954,6 +1002,30 @@
 
     function setMusicStatus(text) {
       musicStatusEl.textContent = text || '';
+    }
+
+    // The phone relays every queued song back out to all connected browsers (including
+    // the queuer) so everyone sees a live shared list, not just their own additions.
+    function addQueueListItem(title, channel) {
+      const row = document.createElement('div');
+      row.className = 'music-result';
+
+      const info = document.createElement('div');
+      info.className = 'music-result-info';
+      const nameEl = document.createElement('div');
+      nameEl.className = 'music-result-name';
+      nameEl.textContent = title;
+      const artistEl = document.createElement('div');
+      artistEl.className = 'music-result-artist';
+      artistEl.textContent = channel;
+      info.appendChild(nameEl);
+      info.appendChild(artistEl);
+      row.appendChild(info);
+
+      musicQueueListEl.insertBefore(row, musicQueueListEl.firstChild);
+      while (musicQueueListEl.children.length > MAX_QUEUE_LIST_ITEMS) {
+        musicQueueListEl.removeChild(musicQueueListEl.lastChild);
+      }
     }
 
     function friendlyQueueError(statusName) {
@@ -991,7 +1063,7 @@
         const queueBtn = document.createElement('button');
         queueBtn.type = 'button';
         queueBtn.textContent = 'Queue';
-        queueBtn.addEventListener('click', () => queueSelected(video.videoId, queueBtn));
+        queueBtn.addEventListener('click', () => queueSelected(video, queueBtn));
 
         row.appendChild(info);
         row.appendChild(queueBtn);
@@ -999,7 +1071,7 @@
       }
     }
 
-    async function queueSelected(videoId, btn) {
+    async function queueSelected(video, btn) {
       if (!rxCharacteristic) {
         setMusicStatus('Connect to the phone first to queue songs.');
         return;
@@ -1007,7 +1079,7 @@
       btn.disabled = true;
       btn.textContent = '…';
       try {
-        await queueVideo(videoId);
+        await queueVideo(video.videoId, video.title, video.channel);
         btn.textContent = 'Added ✓';
         setMusicStatus('Added to the queue!');
       } catch (err) {

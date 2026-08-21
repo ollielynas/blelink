@@ -14,10 +14,13 @@
 <script>
   // Minimal queue player driven from the Android side via evaluateJavascript("addToQueue('<id>')").
   // Videos play in the order they're queued; the next one starts automatically when one ends.
+  // Once the queue runs dry, it keeps the party going by replaying a random video from
+  // everything queued so far, rather than just stopping.
   let player = null;
   let ready = false;
   let isPlaying = false;
   const queue = [];
+  const history = []; // every videoId ever queued, for random replay once the queue is empty
 
   function onYouTubeIframeAPIReady() {
     player = new YT.Player('player', {
@@ -41,9 +44,14 @@
   }
 
   function playNextIfIdle() {
-    if (!isPlaying && queue.length > 0) {
+    if (isPlaying) return;
+    if (queue.length > 0) {
       const videoId = queue.shift();
       isPlaying = true; // optimistic; corrected by the next onStateChange if it doesn't actually start
+      player.loadVideoById(videoId);
+    } else if (history.length > 0) {
+      const videoId = history[Math.floor(Math.random() * history.length)];
+      isPlaying = true;
       player.loadVideoById(videoId);
     }
   }
@@ -51,6 +59,7 @@
   // Called from MainActivity.kt when a guest queues a song.
   function addToQueue(videoId) {
     queue.push(videoId);
+    history.push(videoId);
     if (ready) playNextIfIdle();
   }
 </script>
