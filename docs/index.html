@@ -1,0 +1,798 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1" />
+<title>BleLink</title>
+<style>
+  :root {
+    --ink: #18140F;
+    --paper: #F3EEE1;
+    --card: #FFFDF7;
+    --accent: #FF5A36;
+    --accent-2: #2F6FED;
+    --on-accent: #FFFDF7;
+    --muted: #746B58;
+    --border: #18140F;
+    --success: #1B8A5A;
+    --danger: #C6383A;
+  }
+
+  * { box-sizing: border-box; }
+
+  /* Guards against elements that also set their own `display` (e.g. #chatNameEntry's
+     flex layout) from out-specificity-ing the browser's default [hidden] rule. */
+  [hidden] { display: none !important; }
+
+  body {
+    font-family: -apple-system, BlinkMacSystemFont, "Helvetica Neue", Arial, sans-serif;
+    background-color: var(--paper);
+    background-image: radial-gradient(rgba(24, 20, 15, 0.14) 1.2px, transparent 1.2px);
+    background-size: 20px 20px;
+    color: var(--ink);
+    margin: 0;
+    min-height: 100vh;
+    display: flex;
+    justify-content: center;
+    padding: 20px 16px;
+  }
+
+  .card {
+    width: 100%;
+    max-width: 420px;
+    background: var(--card);
+    border: 3px solid var(--border);
+    border-radius: 14px;
+    box-shadow: 7px 7px 0 var(--border);
+    padding: 22px;
+    height: fit-content;
+  }
+
+  .header {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    gap: 12px;
+    margin-bottom: 18px;
+  }
+
+  h1 {
+    font-size: 22px;
+    font-weight: 900;
+    letter-spacing: -0.02em;
+    text-transform: uppercase;
+    margin: 0;
+  }
+
+  h1 .accent-mark {
+    background: var(--accent);
+    color: var(--on-accent);
+    padding: 0 4px;
+    margin-left: -2px;
+  }
+
+  .pill {
+    display: inline-flex;
+    align-items: center;
+    gap: 6px;
+    padding: 5px 10px;
+    border: 2px solid var(--border);
+    border-radius: 999px;
+    background: var(--card);
+    color: var(--ink);
+    font-size: 11px;
+    font-weight: 800;
+    text-transform: uppercase;
+    letter-spacing: 0.04em;
+    white-space: nowrap;
+  }
+
+  .pill.connected { background: var(--success); color: var(--on-accent); }
+  .pill.error { background: var(--danger); color: var(--on-accent); }
+
+  .dot {
+    width: 7px;
+    height: 7px;
+    border-radius: 50%;
+    background: currentColor;
+    flex-shrink: 0;
+  }
+
+  button {
+    width: 100%;
+    padding: 14px 16px;
+    font-size: 15px;
+    font-weight: 800;
+    font-family: inherit;
+    border: 2px solid var(--border);
+    border-radius: 10px;
+    background: var(--accent);
+    color: var(--on-accent);
+    cursor: pointer;
+    box-shadow: 4px 4px 0 var(--border);
+    transition: transform 0.08s ease, box-shadow 0.08s ease, opacity 0.08s ease;
+  }
+
+  button:active:not(:disabled) {
+    transform: translate(3px, 3px);
+    box-shadow: 1px 1px 0 var(--border);
+  }
+
+  button:disabled {
+    opacity: 0.4;
+    cursor: not-allowed;
+  }
+
+  #photoInput { display: none; }
+
+  .menu-options {
+    display: flex;
+    flex-direction: column;
+    gap: 10px;
+    margin-top: 16px;
+  }
+
+  .menu-btn {
+    background: var(--card);
+    color: var(--ink);
+    text-align: left;
+    font-size: 16px;
+    text-transform: none;
+    letter-spacing: normal;
+  }
+
+  .subheader {
+    display: flex;
+    align-items: center;
+    gap: 10px;
+    margin-bottom: 18px;
+  }
+
+  .back-btn {
+    width: auto;
+    background: var(--card);
+    color: var(--ink);
+    padding: 8px 12px;
+    font-size: 13px;
+    box-shadow: 3px 3px 0 var(--border);
+  }
+
+  .back-btn:active:not(:disabled) {
+    box-shadow: 1px 1px 0 var(--border);
+  }
+
+  .subheader-title {
+    font-size: 18px;
+    font-weight: 900;
+    text-transform: uppercase;
+    letter-spacing: -0.01em;
+  }
+
+  .progress-wrap {
+    margin-top: 16px;
+  }
+
+  .progress-track {
+    height: 10px;
+    border: 2px solid var(--border);
+    border-radius: 6px;
+    background: var(--card);
+    overflow: hidden;
+  }
+
+  .progress-fill {
+    height: 100%;
+    width: 0%;
+    background: var(--accent-2);
+    transition: width 0.2s ease;
+  }
+
+  .progress-label {
+    margin-top: 8px;
+    font-size: 12px;
+    font-weight: 700;
+    text-transform: uppercase;
+    letter-spacing: 0.03em;
+    color: var(--muted);
+    text-align: center;
+  }
+
+  .hint {
+    font-size: 13px;
+    color: var(--muted);
+    margin: 0 0 10px;
+  }
+
+  .text-input {
+    width: 100%;
+    padding: 10px 12px;
+    font-size: 14px;
+    font-family: inherit;
+    border: 2px solid var(--border);
+    border-radius: 8px;
+    background: var(--card);
+    color: var(--ink);
+    min-width: 0;
+  }
+
+  .text-input:focus {
+    outline: 3px solid var(--accent-2);
+    outline-offset: 0;
+  }
+
+  #chatNameEntry {
+    display: flex;
+    flex-direction: column;
+    gap: 10px;
+  }
+
+  .chat-messages {
+    max-height: 220px;
+    overflow-y: auto;
+    display: flex;
+    flex-direction: column;
+    gap: 8px;
+    padding-right: 2px;
+  }
+
+  .chat-messages:empty::before {
+    content: "No messages yet";
+    color: var(--muted);
+    font-size: 13px;
+  }
+
+  .chat-bubble {
+    align-self: flex-start;
+    background: var(--card);
+    color: var(--ink);
+    border: 2px solid var(--border);
+    padding: 7px 11px;
+    border-radius: 10px 10px 10px 2px;
+    font-size: 13px;
+    max-width: 85%;
+    word-break: break-word;
+  }
+
+  .chat-bubble-name {
+    font-size: 10px;
+    font-weight: 800;
+    text-transform: uppercase;
+    letter-spacing: 0.04em;
+    color: var(--muted);
+    margin-bottom: 2px;
+  }
+
+  .chat-bubble.mine .chat-bubble-name {
+    color: rgba(255, 253, 247, 0.75);
+  }
+
+  .chat-bubble.mine {
+    align-self: flex-end;
+    background: var(--accent-2);
+    color: var(--on-accent);
+    border-radius: 10px 10px 2px 10px;
+  }
+
+  .chat-input-row {
+    display: flex;
+    gap: 8px;
+    margin-top: 10px;
+  }
+
+  .chat-input-row .text-input {
+    flex: 1;
+  }
+
+  #chatSend {
+    width: auto;
+    padding: 10px 16px;
+    background: var(--accent-2);
+  }
+</style>
+</head>
+<body>
+  <div class="card">
+    <div id="menuScreen">
+      <div class="header">
+        <h1>Ble<span class="accent-mark">Link</span></h1>
+        <div class="pill" id="statusPill">
+          <span class="dot"></span>
+          <span id="status">Not connected</span>
+        </div>
+      </div>
+
+      <button id="connect">Connect to phone</button>
+
+      <div class="menu-options">
+        <button type="button" class="menu-btn" id="openPhotos">📷 Photos</button>
+        <button type="button" class="menu-btn" id="openChat">💬 Group chat</button>
+      </div>
+    </div>
+
+    <div id="photoScreen" hidden>
+      <div class="subheader">
+        <button type="button" class="back-btn" id="backFromPhotos">← Back</button>
+        <span class="subheader-title">Photos</span>
+      </div>
+
+      <button id="takePhoto" disabled>Take photo</button>
+      <input id="photoInput" type="file" accept="image/*" capture="environment" />
+
+      <div class="progress-wrap" id="progressWrap" hidden>
+        <div class="progress-track"><div class="progress-fill" id="progressFill"></div></div>
+        <div class="progress-label" id="progressLabel"></div>
+      </div>
+    </div>
+
+    <div id="chatScreen" hidden>
+      <div class="subheader">
+        <button type="button" class="back-btn" id="backFromChat">← Back</button>
+        <span class="subheader-title">Group chat</span>
+      </div>
+
+      <div id="chatNameEntry">
+        <p class="hint">Pick a name to join the group chat</p>
+        <input id="chatNameInput" class="text-input" type="text" placeholder="Your name" maxlength="30" />
+        <button id="chatNameContinue">Join chat</button>
+      </div>
+
+      <div id="chatBody" hidden>
+        <div class="chat-messages" id="chatMessages"></div>
+        <div class="chat-input-row">
+          <input id="chatInput" class="text-input" type="text" placeholder="Message everyone…" maxlength="200" disabled />
+          <button id="chatSend" disabled>Send</button>
+        </div>
+      </div>
+    </div>
+  </div>
+
+  <script>
+    // Must match the UUIDs used in the Android app's UART-style GATT service.
+    const SERVICE_UUID = '6e400001-b5a3-f393-e0a9-e50e24dcca9e';
+    const RX_CHAR_UUID = '6e400002-b5a3-f393-e0a9-e50e24dcca9e'; // browser writes here -> phone receives
+    const TX_CHAR_UUID = '6e400003-b5a3-f393-e0a9-e50e24dcca9e'; // phone notifies here -> browser receives
+
+    // Wire protocol (see PhotoProtocol.kt / ChatProtocol.kt on the Android side for the
+    // authoritative spec). Photo and chat uploads share the same START/DATA/END frame shape
+    // (opcode, id, u32 BE length for START/END; opcode, id, u16 BE seq, payload for DATA),
+    // just with different opcodes, so both reuse the same chunked sender below.
+    const OP_PHOTO_START = 0x01;
+    const OP_PHOTO_DATA = 0x02;
+    const OP_PHOTO_END = 0x03;
+    const OP_PHOTO_ACK = 0x81;
+
+    const OP_CHAT_SEND = 0x10;
+    const OP_CHAT_SEND_DATA = 0x11;
+    const OP_CHAT_SEND_END = 0x12;
+    const OP_CHAT_ACK = 0x83;
+
+    const OP_CHAT_RECV = 0x92;
+    const OP_CHAT_RECV_DATA = 0x93;
+    const OP_CHAT_RECV_END = 0x94;
+
+    const ACK_STATUS_NAMES = {
+      0x00: 'OK',
+      0x01: 'ERR_LENGTH_MISMATCH',
+      0x02: 'ERR_DECODE_FAILED',
+      0x03: 'ERR_TOO_LARGE',
+      0x04: 'ERR_TIMEOUT',
+    };
+
+    // Total BLE frame byte length (header + payload) per rung. Web Bluetooth exposes no
+    // MTU query/negotiation API, so the effective size can only be discovered by trying a
+    // write and shrinking on failure. The index only ever moves down and is cached for the
+    // rest of the connection once a size is found to work.
+    const CHUNK_SIZE_LADDER = [500, 240, 180, 100, 50, 18];
+    const DATA_HEADER_SIZE = 4; // opcode + id + seq(u16)
+    let chunkSizeIndex = 0;
+
+    const MAX_PHOTO_BYTES = 120_000; // soft compression target; hard cap on Android is 300,000
+    const CHAT_NAME_SEPARATOR = ''; // joins "name" + sep + "text" in the chat wire payload
+    const ACK_TIMEOUT_MS = 10_000;
+
+    const statusEl = document.getElementById('status');
+    const statusPillEl = document.getElementById('statusPill');
+    const progressWrapEl = document.getElementById('progressWrap');
+    const progressFillEl = document.getElementById('progressFill');
+    const progressLabelEl = document.getElementById('progressLabel');
+    const connectBtn = document.getElementById('connect');
+    const takePhotoBtn = document.getElementById('takePhoto');
+    const photoInput = document.getElementById('photoInput');
+
+    const menuScreenEl = document.getElementById('menuScreen');
+    const photoScreenEl = document.getElementById('photoScreen');
+    const chatScreenEl = document.getElementById('chatScreen');
+    const openPhotosBtn = document.getElementById('openPhotos');
+    const openChatBtn = document.getElementById('openChat');
+    const backFromPhotosBtn = document.getElementById('backFromPhotos');
+    const backFromChatBtn = document.getElementById('backFromChat');
+    const chatNameEntryEl = document.getElementById('chatNameEntry');
+    const chatNameInput = document.getElementById('chatNameInput');
+    const chatNameContinueBtn = document.getElementById('chatNameContinue');
+    const chatBodyEl = document.getElementById('chatBody');
+    const chatMessagesEl = document.getElementById('chatMessages');
+    const chatInput = document.getElementById('chatInput');
+    const chatSendBtn = document.getElementById('chatSend');
+
+    let rxCharacteristic = null; // write to phone
+    let device = null;
+    let myName = null;
+
+    let transferIdCounter = 0;
+    let chatMsgIdCounter = 0;
+    const pendingPhotoAcks = new Map(); // transferId -> { resolve, reject, timer }
+    const pendingChatAcks = new Map(); // msgId -> { resolve, reject, timer }
+    let chatRecvBuffer = null; // { msgId, expected, chunks: [] } for the in-flight incoming broadcast
+
+    function log(line) {
+      console.log(line);
+    }
+
+    function setStatus(text, kind) {
+      statusEl.textContent = text;
+      statusPillEl.classList.remove('connected', 'error');
+      if (kind) statusPillEl.classList.add(kind);
+    }
+
+    function setProgress(label, percent) {
+      if (label == null) {
+        progressWrapEl.hidden = true;
+        return;
+      }
+      progressWrapEl.hidden = false;
+      progressLabelEl.textContent = label;
+      progressFillEl.style.width = (percent ?? 0) + '%';
+    }
+
+    function showMenu() {
+      menuScreenEl.hidden = false;
+      photoScreenEl.hidden = true;
+      chatScreenEl.hidden = true;
+    }
+
+    function showPhotos() {
+      menuScreenEl.hidden = true;
+      photoScreenEl.hidden = false;
+      chatScreenEl.hidden = true;
+    }
+
+    function showChat() {
+      menuScreenEl.hidden = true;
+      photoScreenEl.hidden = true;
+      chatScreenEl.hidden = false;
+      // Once a name has been picked, skip straight to the chat body on every future visit.
+      if (myName) {
+        chatNameEntryEl.hidden = true;
+        chatBodyEl.hidden = false;
+        chatInput.focus();
+      } else {
+        chatNameEntryEl.hidden = false;
+        chatBodyEl.hidden = true;
+        chatNameInput.focus();
+      }
+    }
+
+    openPhotosBtn.addEventListener('click', showPhotos);
+    openChatBtn.addEventListener('click', showChat);
+    backFromPhotosBtn.addEventListener('click', showMenu);
+    backFromChatBtn.addEventListener('click', showMenu);
+
+    function joinChat() {
+      const name = chatNameInput.value.trim();
+      if (!name) return;
+      myName = name.slice(0, 30);
+      chatNameEntryEl.hidden = true;
+      chatBodyEl.hidden = false;
+      chatInput.focus();
+    }
+
+    chatNameContinueBtn.addEventListener('click', joinChat);
+    chatNameInput.addEventListener('keydown', (e) => {
+      if (e.key === 'Enter') joinChat();
+    });
+
+    if (!navigator.bluetooth) {
+      setStatus('Web Bluetooth not supported (use Chrome/Edge)', 'error');
+      connectBtn.disabled = true;
+    }
+
+    connectBtn.addEventListener('click', async () => {
+      if (rxCharacteristic) {
+        device?.gatt?.disconnect();
+        return;
+      }
+
+      try {
+        setStatus('Requesting device…');
+        device = await navigator.bluetooth.requestDevice({
+          filters: [{ services: [SERVICE_UUID] }]
+        });
+
+        device.addEventListener('gattserverdisconnected', onDisconnected);
+
+        setStatus('Connecting…');
+        const server = await device.gatt.connect();
+        const service = await server.getPrimaryService(SERVICE_UUID);
+
+        rxCharacteristic = await service.getCharacteristic(RX_CHAR_UUID);
+        const txCharacteristic = await service.getCharacteristic(TX_CHAR_UUID);
+
+        await txCharacteristic.startNotifications();
+        txCharacteristic.addEventListener('characteristicvaluechanged', onTxNotification);
+
+        setStatus('Connected to ' + (device.name || device.id), 'connected');
+        connectBtn.textContent = 'Disconnect from phone';
+        takePhotoBtn.disabled = false;
+        chatInput.disabled = false;
+        chatSendBtn.disabled = false;
+      } catch (err) {
+        setStatus('Error: ' + err.message, 'error');
+        console.error(err);
+      }
+    });
+
+    function onDisconnected() {
+      setStatus('Disconnected');
+      connectBtn.textContent = 'Connect to phone';
+      takePhotoBtn.disabled = true;
+      chatInput.disabled = true;
+      chatSendBtn.disabled = true;
+      rxCharacteristic = null;
+      chatRecvBuffer = null;
+      for (const map of [pendingPhotoAcks, pendingChatAcks]) {
+        for (const [, entry] of map) {
+          clearTimeout(entry.timer);
+          entry.reject(new Error('disconnected'));
+        }
+        map.clear();
+      }
+    }
+
+    function handleAck(value, pendingMap) {
+      if (value.length < 3) return;
+      const id = value[1];
+      const status = value[2];
+      const entry = pendingMap.get(id);
+      if (!entry) return;
+      pendingMap.delete(id);
+      clearTimeout(entry.timer);
+      if (status === 0x00) {
+        entry.resolve();
+      } else {
+        entry.reject(new Error(ACK_STATUS_NAMES[status] || `unknown status ${status}`));
+      }
+    }
+
+    function parseLenFrame(value) {
+      const id = value[1];
+      const length = new DataView(value.buffer, value.byteOffset, value.byteLength).getUint32(2, false);
+      return { id, length };
+    }
+
+    function parseDataFrame(value) {
+      const id = value[1];
+      const payload = value.subarray(4);
+      return { id, payload };
+    }
+
+    function onTxNotification(event) {
+      const value = new Uint8Array(event.target.value.buffer);
+      if (value.length < 1) return;
+      const opcode = value[0];
+
+      if (opcode === OP_PHOTO_ACK) {
+        handleAck(value, pendingPhotoAcks);
+      } else if (opcode === OP_CHAT_ACK) {
+        handleAck(value, pendingChatAcks);
+      } else if (opcode === OP_CHAT_RECV) {
+        const { id, length } = parseLenFrame(value);
+        chatRecvBuffer = { msgId: id, expected: length, chunks: [] };
+      } else if (opcode === OP_CHAT_RECV_DATA) {
+        if (!chatRecvBuffer) return;
+        const { id, payload } = parseDataFrame(value);
+        if (id !== chatRecvBuffer.msgId) return;
+        chatRecvBuffer.chunks.push(payload);
+      } else if (opcode === OP_CHAT_RECV_END) {
+        if (!chatRecvBuffer) return;
+        const { id } = parseLenFrame(value);
+        const buffered = chatRecvBuffer;
+        chatRecvBuffer = null;
+        if (id !== buffered.msgId) return;
+        const totalLen = buffered.chunks.reduce((n, c) => n + c.length, 0);
+        const merged = new Uint8Array(totalLen);
+        let off = 0;
+        for (const chunk of buffered.chunks) {
+          merged.set(chunk, off);
+          off += chunk.length;
+        }
+        const raw = new TextDecoder().decode(merged);
+        const sep = raw.indexOf(CHAT_NAME_SEPARATOR);
+        const senderName = sep >= 0 ? raw.slice(0, sep) : 'Guest';
+        const messageText = sep >= 0 ? raw.slice(sep + 1) : raw;
+        addChatBubble(senderName, messageText, false);
+      }
+    }
+
+    function waitForAckIn(pendingMap, id) {
+      return new Promise((resolve, reject) => {
+        const timer = setTimeout(() => {
+          pendingMap.delete(id);
+          reject(new Error('ack timeout'));
+        }, ACK_TIMEOUT_MS);
+        pendingMap.set(id, { resolve, reject, timer });
+      });
+    }
+
+    function nextTransferId() {
+      transferIdCounter = (transferIdCounter + 1) % 256;
+      return transferIdCounter;
+    }
+
+    function nextChatMsgId() {
+      chatMsgIdCounter = (chatMsgIdCounter + 1) % 256;
+      return chatMsgIdCounter;
+    }
+
+    function buildStartFrame(opcode, id, totalLength) {
+      const frame = new Uint8Array(6);
+      frame[0] = opcode;
+      frame[1] = id;
+      new DataView(frame.buffer).setUint32(2, totalLength, false);
+      return frame;
+    }
+
+    function buildDataFrame(opcode, id, seq, payload) {
+      const frame = new Uint8Array(DATA_HEADER_SIZE + payload.length);
+      frame[0] = opcode;
+      frame[1] = id;
+      new DataView(frame.buffer).setUint16(2, seq, false);
+      frame.set(payload, DATA_HEADER_SIZE);
+      return frame;
+    }
+
+    function buildEndFrame(opcode, id, totalLength) {
+      const frame = new Uint8Array(6);
+      frame[0] = opcode;
+      frame[1] = id;
+      new DataView(frame.buffer).setUint32(2, totalLength, false);
+      return frame;
+    }
+
+    // Shared chunked sender for both photo and chat uploads — only the opcodes differ.
+    // Uses the adaptive chunk-size ladder (shrink-on-write-failure, cached for the connection).
+    async function sendChunked(opStart, opData, opEnd, id, bytes, onProgress) {
+      const totalLength = bytes.length;
+      await rxCharacteristic.writeValueWithResponse(buildStartFrame(opStart, id, totalLength));
+
+      let offset = 0;
+      let seq = 0;
+      while (offset < bytes.length) {
+        const frameSize = CHUNK_SIZE_LADDER[chunkSizeIndex];
+        const payloadSize = Math.max(1, frameSize - DATA_HEADER_SIZE);
+        const payload = bytes.subarray(offset, offset + payloadSize);
+        const frame = buildDataFrame(opData, id, seq, payload);
+
+        try {
+          await rxCharacteristic.writeValueWithResponse(frame);
+          offset += payload.length;
+          seq++;
+          if (onProgress) onProgress(offset, totalLength);
+        } catch (err) {
+          if (chunkSizeIndex < CHUNK_SIZE_LADDER.length - 1) {
+            chunkSizeIndex++;
+            log(`write failed, shrinking chunk size to ${CHUNK_SIZE_LADDER[chunkSizeIndex]} bytes`);
+          } else {
+            throw err;
+          }
+        }
+      }
+
+      await rxCharacteristic.writeValueWithResponse(buildEndFrame(opEnd, id, totalLength));
+    }
+
+    // Compresses `file` into a JPEG blob under MAX_PHOTO_BYTES, shrinking dimensions/quality
+    // over a few attempts if needed. Runs entirely client-side via an offscreen canvas.
+    async function compressImage(file) {
+      const bitmap = await createImageBitmap(file);
+      let maxDim = 640;
+      let quality = 0.6;
+
+      for (let attempt = 0; attempt < 5; attempt++) {
+        const scale = Math.min(1, maxDim / Math.max(bitmap.width, bitmap.height));
+        const width = Math.max(1, Math.round(bitmap.width * scale));
+        const height = Math.max(1, Math.round(bitmap.height * scale));
+
+        const canvas = document.createElement('canvas');
+        canvas.width = width;
+        canvas.height = height;
+        canvas.getContext('2d').drawImage(bitmap, 0, 0, width, height);
+
+        const blob = await new Promise((resolve) => canvas.toBlob(resolve, 'image/jpeg', quality));
+        if (blob.size <= MAX_PHOTO_BYTES || attempt === 4) {
+          return blob;
+        }
+        quality = Math.max(0.3, quality - 0.1);
+        maxDim = Math.max(320, Math.floor(maxDim * 0.8));
+      }
+    }
+
+    async function sendPhoto(bytes) {
+      const transferId = nextTransferId();
+      await sendChunked(OP_PHOTO_START, OP_PHOTO_DATA, OP_PHOTO_END, transferId, bytes, (offset, total) => {
+        setProgress('Sending photo…', Math.round((offset / total) * 100));
+      });
+      await waitForAckIn(pendingPhotoAcks, transferId);
+    }
+
+    photoInput.addEventListener('change', async () => {
+      const file = photoInput.files[0];
+      photoInput.value = '';
+      if (!file || !rxCharacteristic) return;
+
+      takePhotoBtn.disabled = true;
+      try {
+        setProgress('Compressing…', 0);
+        const blob = await compressImage(file);
+        const bytes = new Uint8Array(await blob.arrayBuffer());
+        log(`compressed to ${bytes.length} bytes`);
+
+        setProgress('Sending photo…', 0);
+        await sendPhoto(bytes);
+
+        setProgress('Sent ✓', 100);
+        log('photo sent and acknowledged');
+        setTimeout(() => setProgress(null), 1500);
+      } catch (err) {
+        setProgress(null);
+        log('send failed: ' + err.message);
+      } finally {
+        takePhotoBtn.disabled = !rxCharacteristic;
+      }
+    });
+
+    takePhotoBtn.addEventListener('click', () => photoInput.click());
+
+    function addChatBubble(name, text, mine) {
+      const bubble = document.createElement('div');
+      bubble.className = 'chat-bubble' + (mine ? ' mine' : '');
+
+      const nameEl = document.createElement('div');
+      nameEl.className = 'chat-bubble-name';
+      nameEl.textContent = name;
+      bubble.appendChild(nameEl);
+
+      const textEl = document.createElement('div');
+      textEl.textContent = text;
+      bubble.appendChild(textEl);
+
+      chatMessagesEl.appendChild(bubble);
+      chatMessagesEl.scrollTop = chatMessagesEl.scrollHeight;
+    }
+
+    async function sendChatMessage() {
+      const text = chatInput.value.trim();
+      if (!text || !rxCharacteristic || !myName) return;
+      chatInput.value = '';
+      chatSendBtn.disabled = true;
+      try {
+        // A control character separates name from text on the wire (rather than ": ") so a
+        // colon typed inside either the name or the message can never be misparsed as the split point.
+        const bytes = new TextEncoder().encode(`${myName}${CHAT_NAME_SEPARATOR}${text}`);
+        const msgId = nextChatMsgId();
+        await sendChunked(OP_CHAT_SEND, OP_CHAT_SEND_DATA, OP_CHAT_SEND_END, msgId, bytes);
+        await waitForAckIn(pendingChatAcks, msgId);
+        addChatBubble('You', text, true);
+      } catch (err) {
+        log('chat send failed: ' + err.message);
+      } finally {
+        chatSendBtn.disabled = !rxCharacteristic;
+      }
+    }
+
+    chatSendBtn.addEventListener('click', sendChatMessage);
+    chatInput.addEventListener('keydown', (e) => {
+      if (e.key === 'Enter') sendChatMessage();
+    });
+  </script>
+</body>
+</html>
