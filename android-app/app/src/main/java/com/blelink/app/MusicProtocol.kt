@@ -23,6 +23,13 @@ import java.io.ByteArrayOutputStream
  *   MUSIC_QUEUE_RECV      = (opcode, msgId, totalLength: u32 BE)
  *   MUSIC_QUEUE_RECV_DATA = (opcode, msgId, seq: u16 BE, payload...)
  *   MUSIC_QUEUE_RECV_END  = (opcode, msgId, totalLength: u32 BE)
+ *
+ * Phone -> every connected browser (periodic broadcast, unprompted, so guests who tap "Join
+ * Audio" can play the same video in their own tab and stay roughly in step with the phone;
+ * payload is JSON {"v":videoId,"p":positionSeconds,"pl":isPlaying}):
+ *   MUSIC_SYNC      = (opcode, msgId, totalLength: u32 BE)
+ *   MUSIC_SYNC_DATA = (opcode, msgId, seq: u16 BE, payload...)
+ *   MUSIC_SYNC_END  = (opcode, msgId, totalLength: u32 BE)
  */
 object MusicProtocol {
     const val OP_MUSIC_QUEUE: Byte = 0x33
@@ -34,6 +41,10 @@ object MusicProtocol {
     const val OP_MUSIC_QUEUE_RECV: Byte = 0xB0.toByte()
     const val OP_MUSIC_QUEUE_RECV_DATA: Byte = 0xB1.toByte()
     const val OP_MUSIC_QUEUE_RECV_END: Byte = 0xB2.toByte()
+
+    const val OP_MUSIC_SYNC: Byte = 0xB3.toByte()
+    const val OP_MUSIC_SYNC_DATA: Byte = 0xB4.toByte()
+    const val OP_MUSIC_SYNC_END: Byte = 0xB5.toByte()
 
     const val QUEUE_STATUS_OK: Byte = 0x00
     const val QUEUE_STATUS_INVALID_ID: Byte = 0x01

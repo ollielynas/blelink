@@ -366,6 +366,21 @@
     letter-spacing: 0.06em;
     color: var(--muted);
   }
+
+  #joinAudioBtn {
+    background: var(--accent-2);
+    margin-bottom: 14px;
+  }
+
+  .sync-player {
+    width: 100%;
+    height: 160px;
+    margin-bottom: 14px;
+    border: 2px solid var(--border);
+    border-radius: 10px;
+    overflow: hidden;
+    background: #000;
+  }
 </style>
 </head>
 <body>
@@ -432,6 +447,9 @@
 
       <p class="hint">Songs you queue <span class="accent-mark">play next</span> on the host's phone</p>
 
+      <button type="button" id="joinAudioBtn">🔊 Join Audio</button>
+      <div class="sync-player" id="syncPlayerContainer" hidden></div>
+
       <div class="chat-input-row">
         <input id="musicSearchInput" class="text-input" type="text" placeholder="Search a song or artist…" maxlength="100" />
         <button id="musicSearchBtn" class="inline-btn">Search</button>
@@ -477,6 +495,10 @@
     const OP_MUSIC_QUEUE_RECV = 0xB0;
     const OP_MUSIC_QUEUE_RECV_DATA = 0xB1;
     const OP_MUSIC_QUEUE_RECV_END = 0xB2;
+
+    const OP_MUSIC_SYNC = 0xB3;
+    const OP_MUSIC_SYNC_DATA = 0xB4;
+    const OP_MUSIC_SYNC_END = 0xB5;
 
     const ACK_STATUS_NAMES = {
       0x00: 'OK',
@@ -540,6 +562,8 @@
     const musicResultsEl = document.getElementById('musicResults');
     const musicQueueListEl = document.getElementById('musicQueueList');
     const MAX_QUEUE_LIST_ITEMS = 20;
+    const joinAudioBtn = document.getElementById('joinAudioBtn');
+    const syncPlayerContainer = document.getElementById('syncPlayerContainer');
 
     let rxCharacteristic = null; // write to phone
     let device = null;
@@ -553,6 +577,15 @@
     const pendingQueueAcks = new Map(); // msgId -> { resolve, reject, timer }
     let chatRecvBuffer = null; // { msgId, expected, chunks: [] } for the in-flight incoming broadcast
     let musicQueueRecvBuffer = null; // same shape, for the in-flight incoming "queued" relay
+    let musicSyncRecvBuffer = null; // same shape, for the in-flight incoming sync-state broadcast
+
+    // Guest-side sync player state (only used once "Join Audio" is tapped).
+    let syncPlayer = null;
+    let syncPlayerReady = false;
+    let syncApiLoading = false;
+    let syncCurrentVideoId = null;
+    let pendingSyncState = null;
+    const SYNC_DRIFT_THRESHOLD_SECONDS = 1.5;
 
     function log(line) {
       console.log(line);
@@ -683,6 +716,7 @@
       rxCharacteristic = null;
       chatRecvBuffer = null;
       musicQueueRecvBuffer = null;
+      musicSyncRecvBuffer = null;
       for (const map of [pendingPhotoAcks, pendingChatAcks, pendingQueueAcks]) {
         for (const [, entry] of map) {
           clearTimeout(entry.timer);
@@ -782,6 +816,33 @@
           addQueueListItem(info.t || 'Unknown title', info.c || '');
         } catch (err) {
           // malformed relay payload — ignore
+        }
+      } else if (opcode === OP_MUSIC_SYNC) {
+        const { id, length } = parseLenFrame(value);
+        musicSyncRecvBuffer = { msgId: id, expected: length, chunks: [] };
+      } else if (opcode === OP_MUSIC_SYNC_DATA) {
+        if (!musicSyncRecvBuffer) return;
+        const { id, payload } = parseDataFrame(value);
+        if (id !== musicSyncRecvBuffer.msgId) return;
+        musicSyncRecvBuffer.chunks.push(payload);
+      } else if (opcode === OP_MUSIC_SYNC_END) {
+        if (!musicSyncRecvBuffer) return;
+        const { id } = parseLenFrame(value);
+        const buffered = musicSyncRecvBuffer;
+        musicSyncRecvBuffer = null;
+        if (id !== buffered.msgId) return;
+        const totalLen = buffered.chunks.reduce((n, c) => n + c.length, 0);
+        const merged = new Uint8Array(totalLen);
+        let off = 0;
+        for (const chunk of buffered.chunks) {
+          merged.set(chunk, off);
+          off += chunk.length;
+        }
+        try {
+          const state = JSON.parse(new TextDecoder().decode(merged));
+          applySyncState(state.v, state.p, state.pl);
+        } catch (err) {
+          // malformed sync payload — ignore
         }
       }
     }
@@ -1115,6 +1176,64 @@
     musicSearchInput.addEventListener('keydown', (e) => {
       if (e.key === 'Enter') performSearch();
     });
+
+    // "Join Audio" plays the same video the phone is playing, in this browser's own tab,
+    // resyncing every few seconds from the phone's broadcasts. It's approximate, not
+    // sample-accurate — BLE latency and independent buffering rule that out — and browsers
+    // require a tap before they'll let a video start with sound, hence the explicit button.
+    function joinAudio() {
+      joinAudioBtn.hidden = true;
+      syncPlayerContainer.hidden = false;
+      if (syncApiLoading) return;
+      syncApiLoading = true;
+      if (window.YT && window.YT.Player) {
+        createSyncPlayer();
+      } else {
+        window.onYouTubeIframeAPIReady = createSyncPlayer;
+        const tag = document.createElement('script');
+        tag.src = 'https://www.youtube.com/iframe_api';
+        document.head.appendChild(tag);
+      }
+    }
+
+    function createSyncPlayer() {
+      syncPlayer = new YT.Player('syncPlayerContainer', {
+        height: '100%',
+        width: '100%',
+        playerVars: { playsinline: 1, controls: 1, rel: 0 },
+        events: {
+          onReady: () => {
+            syncPlayerReady = true;
+            if (pendingSyncState) {
+              applySyncState(pendingSyncState.v, pendingSyncState.p, pendingSyncState.pl);
+              pendingSyncState = null;
+            }
+          }
+        }
+      });
+    }
+
+    function applySyncState(videoId, position, playing) {
+      if (!videoId) return;
+      if (!syncPlayerReady || !syncPlayer) {
+        pendingSyncState = { v: videoId, p: position, pl: playing };
+        return;
+      }
+      if (videoId !== syncCurrentVideoId) {
+        syncCurrentVideoId = videoId;
+        syncPlayer.loadVideoById({ videoId, startSeconds: position });
+        if (!playing) syncPlayer.pauseVideo();
+        return;
+      }
+      const current = syncPlayer.getCurrentTime();
+      if (Math.abs(current - position) > SYNC_DRIFT_THRESHOLD_SECONDS) {
+        syncPlayer.seekTo(position, true);
+      }
+      if (playing) syncPlayer.playVideo();
+      else syncPlayer.pauseVideo();
+    }
+
+    joinAudioBtn.addEventListener('click', joinAudio);
   </script>
 </body>
 </html>

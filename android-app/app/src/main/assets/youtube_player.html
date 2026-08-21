@@ -19,6 +19,7 @@
   let player = null;
   let ready = false;
   let isPlaying = false;
+  let currentVideoId = null;
   const queue = [];
   const history = []; // every videoId ever queued, for random replay once the queue is empty
 
@@ -48,10 +49,12 @@
     if (queue.length > 0) {
       const videoId = queue.shift();
       isPlaying = true; // optimistic; corrected by the next onStateChange if it doesn't actually start
+      currentVideoId = videoId;
       player.loadVideoById(videoId);
     } else if (history.length > 0) {
       const videoId = history[Math.floor(Math.random() * history.length)];
       isPlaying = true;
+      currentVideoId = videoId;
       player.loadVideoById(videoId);
     }
   }
@@ -61,6 +64,15 @@
     queue.push(videoId);
     history.push(videoId);
     if (ready) playNextIfIdle();
+  }
+
+  // Polled from MainActivity.kt every few seconds and relayed to guest browsers so their
+  // own players (if they've tapped "Join Audio") can stay roughly in step with the phone.
+  function getPlaybackState() {
+    if (!ready || !player || typeof player.getCurrentTime !== 'function') {
+      return { videoId: null, position: 0, playing: false };
+    }
+    return { videoId: currentVideoId, position: player.getCurrentTime(), playing: isPlaying };
   }
 </script>
 </body>

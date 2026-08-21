@@ -13,6 +13,8 @@ import android.graphics.Color
 import android.graphics.drawable.GradientDrawable
 import android.os.Build
 import android.os.Bundle
+import android.os.Handler
+import android.os.Looper
 import android.webkit.WebView
 import androidx.activity.result.contract.ActivityResultContracts
 import androidx.appcompat.app.AppCompatActivity
@@ -51,6 +53,7 @@ class MainActivity : AppCompatActivity() {
 
     private lateinit var binding: ActivityMainBinding
     private lateinit var photoAdapter: PhotoAdapter
+    private val mainHandler = Handler(Looper.getMainLooper())
 
     private lateinit var bluetoothManager: BluetoothManager
     private var bluetoothAdapter: BluetoothAdapter? = null
@@ -128,6 +131,57 @@ class MainActivity : AppCompatActivity() {
         // embedding origin, which is what the player actually expects.
         val html = assets.open("youtube_player.html").bufferedReader().use { it.readText() }
         webView.loadDataWithBaseURL("https://ollielynas.com", html, "text/html", "utf-8", null)
+
+        startMusicSyncLoop()
+    }
+
+    /**
+     * Every few seconds, asks the WebView what's currently playing and relays that (video id +
+     * position + playing/paused) to every connected browser, so a guest who taps "Join Audio"
+     * can play the same video in their own tab and stay roughly — not sample-accurately —
+     * in step. BLE latency and per-guest buffering make tighter sync impractical.
+     */
+    private fun startMusicSyncLoop() {
+        val intervalMs = 5_000L
+        val loop = object : Runnable {
+            override fun run() {
+                binding.youtubePlayerWebView.evaluateJavascript("JSON.stringify(getPlaybackState())") { rawJson ->
+                    broadcastMusicSync(rawJson)
+                }
+                mainHandler.postDelayed(this, intervalMs)
+            }
+        }
+        mainHandler.postDelayed(loop, intervalMs)
+    }
+
+    private fun broadcastMusicSync(rawJson: String?) {
+        if (rawJson.isNullOrEmpty() || rawJson == "null") return
+        if (connectedDevices.isEmpty()) return
+        // evaluateJavascript's callback hands back a JSON-encoded *string* (quotes escaped);
+        // unwrap it once to get the actual JSON object payload it contains.
+        val json = try {
+            JSONObject(org.json.JSONTokener(rawJson).nextValue() as String)
+        } catch (e: Exception) {
+            return
+        }
+        val videoId = json.optString("videoId", "")
+        if (!youtubeIdPattern.matches(videoId)) return
+
+        val payload = JSONObject()
+        payload.put("v", videoId)
+        payload.put("p", json.optDouble("position", 0.0))
+        payload.put("pl", json.optBoolean("playing", false))
+        val bytes = payload.toString().toByteArray(Charsets.UTF_8)
+
+        val syncId = nextMusicMsgId()
+        for (recipient in connectedDevices.values) {
+            if (!recipient.notificationsEnabled) continue
+            sendFramedToDevice(
+                recipient.device, recipient.mtu,
+                MusicProtocol.OP_MUSIC_SYNC, MusicProtocol.OP_MUSIC_SYNC_DATA, MusicProtocol.OP_MUSIC_SYNC_END,
+                syncId, bytes
+            )
+        }
     }
 
     private fun showQrCode() {
@@ -599,5 +653,6 @@ class MainActivity : AppCompatActivity() {
         gattServer?.close()
         decodeExecutor.shutdown()
         chatExecutor.shutdown()
+        mainHandler.removeCallbacksAndMessages(null)
     }
 }
