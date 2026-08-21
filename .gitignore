@@ -1,0 +1,7 @@
+android-app/local.properties
+android-app/**/build/
+android-app/.gradle/
+*.apk
+.idea/
+*.iml
+.DS_Store

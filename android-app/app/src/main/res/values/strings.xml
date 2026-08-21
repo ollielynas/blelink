@@ -1,0 +1,7 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <string name="app_name">BleLink</string>
+    <string name="status_starting">Starting…</string>
+    <string name="message_hint">Message</string>
+    <string name="send">Send</string>
+</resources>

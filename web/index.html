@@ -1,0 +1,112 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1" />
+<title>BleLink</title>
+<style>
+  body { font-family: system-ui, sans-serif; max-width: 480px; margin: 24px auto; padding: 0 16px; }
+  #status { font-weight: bold; margin-bottom: 12px; }
+  #log { background: #eee; padding: 8px; height: 240px; overflow-y: auto; font-family: monospace; font-size: 13px; white-space: pre-wrap; }
+  .row { display: flex; gap: 8px; margin-top: 12px; }
+  #message { flex: 1; }
+  button { padding: 8px 12px; }
+  #connect:disabled, #send:disabled { opacity: 0.5; }
+</style>
+</head>
+<body>
+  <h2>BleLink (Web Bluetooth)</h2>
+  <div id="status">Not connected</div>
+  <button id="connect">Connect to phone</button>
+  <div id="log"></div>
+  <div class="row">
+    <input id="message" type="text" placeholder="Message" disabled />
+    <button id="send" disabled>Send</button>
+  </div>
+
+  <script>
+    // Must match the UUIDs used in the Android app's UART-style GATT service.
+    const SERVICE_UUID = '6e400001-b5a3-f393-e0a9-e50e24dcca9e';
+    const RX_CHAR_UUID = '6e400002-b5a3-f393-e0a9-e50e24dcca9e'; // browser writes here -> phone receives
+    const TX_CHAR_UUID = '6e400003-b5a3-f393-e0a9-e50e24dcca9e'; // phone notifies here -> browser receives
+
+    const statusEl = document.getElementById('status');
+    const logEl = document.getElementById('log');
+    const connectBtn = document.getElementById('connect');
+    const sendBtn = document.getElementById('send');
+    const messageEl = document.getElementById('message');
+
+    let rxCharacteristic = null; // write to phone
+    let device = null;
+
+    function log(line) {
+      logEl.textContent += line + '\n';
+      logEl.scrollTop = logEl.scrollHeight;
+    }
+
+    function setStatus(text) {
+      statusEl.textContent = text;
+    }
+
+    if (!navigator.bluetooth) {
+      setStatus('Web Bluetooth not supported in this browser (use Chrome/Edge)');
+      connectBtn.disabled = true;
+    }
+
+    connectBtn.addEventListener('click', async () => {
+      try {
+        setStatus('Requesting device…');
+        device = await navigator.bluetooth.requestDevice({
+          filters: [{ services: [SERVICE_UUID] }]
+        });
+
+        device.addEventListener('gattserverdisconnected', onDisconnected);
+
+        setStatus('Connecting…');
+        const server = await device.gatt.connect();
+        const service = await server.getPrimaryService(SERVICE_UUID);
+
+        rxCharacteristic = await service.getCharacteristic(RX_CHAR_UUID);
+        const txCharacteristic = await service.getCharacteristic(TX_CHAR_UUID);
+
+        await txCharacteristic.startNotifications();
+        txCharacteristic.addEventListener('characteristicvaluechanged', (event) => {
+          const value = new TextDecoder().decode(event.target.value);
+          log('received: ' + value);
+        });
+
+        setStatus('Connected to ' + (device.name || device.id));
+        sendBtn.disabled = false;
+        messageEl.disabled = false;
+      } catch (err) {
+        setStatus('Error: ' + err.message);
+        console.error(err);
+      }
+    });
+
+    function onDisconnected() {
+      setStatus('Disconnected');
+      sendBtn.disabled = true;
+      messageEl.disabled = true;
+      rxCharacteristic = null;
+    }
+
+    async function sendMessage() {
+      const text = messageEl.value;
+      if (!text || !rxCharacteristic) return;
+      try {
+        await rxCharacteristic.writeValue(new TextEncoder().encode(text));
+        log('sent: ' + text);
+        messageEl.value = '';
+      } catch (err) {
+        log('send failed: ' + err.message);
+      }
+    }
+
+    sendBtn.addEventListener('click', sendMessage);
+    messageEl.addEventListener('keydown', (e) => {
+      if (e.key === 'Enter') sendMessage();
+    });
+  </script>
+</body>
+</html>
