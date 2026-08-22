@@ -15,9 +15,13 @@ import android.os.Build
 import android.os.Bundle
 import android.os.Handler
 import android.os.Looper
+import android.content.Intent
+import android.net.Uri
 import android.webkit.WebView
+import android.widget.Toast
 import androidx.activity.result.contract.ActivityResultContracts
 import androidx.appcompat.app.AppCompatActivity
+import androidx.browser.customtabs.CustomTabsIntent
 import androidx.core.content.ContextCompat
 import androidx.recyclerview.widget.GridLayoutManager
 import com.blelink.app.databinding.ActivityMainBinding
@@ -49,6 +53,12 @@ class MainActivity : AppCompatActivity() {
         const val WEB_URL = "https://ollielynas.com/blelink/"
 
         const val BLE_DEVICE_NAME = "BleLink"
+
+        // Custom Tabs just launches whatever the device's *default* browser is, which may not
+        // be Chrome — Firefox for Android (and most non-Chromium browsers) don't implement Web
+        // Bluetooth at all, so client mode would silently fail to even offer a device chooser.
+        // Chrome is the one reliably known to support it, so prefer it explicitly when installed.
+        const val CHROME_PACKAGE = "com.android.chrome"
     }
 
     private lateinit var binding: ActivityMainBinding
@@ -117,9 +127,43 @@ class MainActivity : AppCompatActivity() {
         binding.photoRecyclerView.adapter = photoAdapter
 
         setUpYoutubePlayer()
+        binding.openClientModeBtn.setOnClickListener { openClientMode() }
 
         showQrCode()
         requestPermissionsAndStart()
+    }
+
+    /**
+     * Opens the same guest web app in a Custom Tab (a real Chrome instance, not the limited
+     * WebView used for the YouTube player), so this phone can act as a Web Bluetooth client
+     * to join a *different* BleLink host — useful for testing, or for a guest who'd rather
+     * not leave the app. Runs as a separate process from this app's own GATT server, so
+     * hosting is unaffected while it's open. A phone can't be a Web Bluetooth client to its
+     * own peripheral, so this is only ever useful for connecting to another device.
+     */
+    private fun openClientMode() {
+        val uri = Uri.parse(WEB_URL)
+        val chromeInstalled = isPackageInstalled(CHROME_PACKAGE)
+        val customTabsIntent = CustomTabsIntent.Builder().build()
+        if (chromeInstalled) {
+            customTabsIntent.intent.setPackage(CHROME_PACKAGE)
+        } else {
+            Toast.makeText(this, "Chrome isn't installed — Web Bluetooth may not work in this browser", Toast.LENGTH_LONG).show()
+        }
+        try {
+            customTabsIntent.launchUrl(this, uri)
+        } catch (e: Exception) {
+            startActivity(Intent(Intent.ACTION_VIEW, uri))
+        }
+    }
+
+    private fun isPackageInstalled(packageName: String): Boolean {
+        return try {
+            packageManager.getPackageInfo(packageName, 0)
+            true
+        } catch (e: PackageManager.NameNotFoundException) {
+            false
+        }
     }
 
     @SuppressLint("SetJavaScriptEnabled")

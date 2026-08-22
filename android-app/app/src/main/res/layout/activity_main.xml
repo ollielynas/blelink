@@ -119,6 +119,63 @@
         </LinearLayout>
     </com.google.android.material.card.MaterialCardView>
 
+    <!-- Client mode: opens the same guest web app in a real Chrome tab, so this phone can
+         join a *different* BleLink host as a guest without leaving the app. Runs independently
+         of the GATT server started below, so hosting keeps working while this is open. -->
+    <com.google.android.material.card.MaterialCardView
+        android:layout_width="match_parent"
+        android:layout_height="wrap_content"
+        android:layout_marginStart="12dp"
+        android:layout_marginEnd="12dp"
+        android:layout_marginBottom="10dp"
+        app:cardCornerRadius="14dp"
+        app:cardElevation="0dp"
+        app:strokeWidth="2dp"
+        app:strokeColor="@color/outline"
+        app:cardBackgroundColor="@color/surface">
+
+        <LinearLayout
+            android:layout_width="match_parent"
+            android:layout_height="wrap_content"
+            android:orientation="horizontal"
+            android:gravity="center_vertical"
+            android:padding="14dp">
+
+            <LinearLayout
+                android:layout_width="0dp"
+                android:layout_height="wrap_content"
+                android:layout_weight="1"
+                android:orientation="vertical">
+
+                <TextView
+                    android:layout_width="wrap_content"
+                    android:layout_height="wrap_content"
+                    android:text="@string/client_mode_title"
+                    android:textStyle="bold"
+                    android:textSize="15sp"
+                    android:textColor="@color/on_background" />
+
+                <TextView
+                    android:layout_width="wrap_content"
+                    android:layout_height="wrap_content"
+                    android:layout_marginTop="2dp"
+                    android:text="@string/client_mode_explainer"
+                    android:textSize="11sp"
+                    android:lineSpacingExtra="2sp"
+                    android:textColor="@color/on_surface_variant" />
+            </LinearLayout>
+
+            <Button
+                android:id="@+id/openClientModeBtn"
+                android:layout_width="wrap_content"
+                android:layout_height="wrap_content"
+                android:layout_marginStart="10dp"
+                android:text="@string/client_mode_button"
+                android:textAllCaps="false"
+                style="@style/Widget.Material3.Button.TonalButton" />
+        </LinearLayout>
+    </com.google.android.material.card.MaterialCardView>
+
     <!-- YouTube "now playing" music queue card -->
     <com.google.android.material.card.MaterialCardView
         android:layout_width="match_parent"

@@ -16,6 +16,14 @@
     <!-- For the embedded YouTube player (WebView loads youtube.com content). -->
     <uses-permission android:name="android.permission.INTERNET" />
 
+    <!-- Android 11+ hides other installed apps from PackageManager queries by default (package
+         visibility filtering). Without this, isPackageInstalled("com.android.chrome") in client
+         mode always reports "not installed" even when Chrome is present, so it silently falls
+         back to whatever the default browser is — which may not support Web Bluetooth at all. -->
+    <queries>
+        <package android:name="com.android.chrome" />
+    </queries>
+
     <application
         android:allowBackup="true"
         android:label="@string/app_name"

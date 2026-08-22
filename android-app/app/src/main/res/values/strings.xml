@@ -10,4 +10,8 @@
 
     <string name="music_title">Music queue</string>
     <string name="music_explainer">Guests can search and queue YouTube videos from the web page — they play here, on this phone, automatically one after another.</string>
+
+    <string name="client_mode_title">Client mode</string>
+    <string name="client_mode_explainer">Join a different phone hosting BleLink, right from here — opens the guest page in Chrome. (This phone can\'t connect to its own server.)</string>
+    <string name="client_mode_button">Open</string>
 </resources>

@@ -42,4 +42,8 @@ dependencies {
     implementation("com.google.android.material:material:1.12.0")
     implementation("com.google.zxing:core:3.5.3")
     implementation("androidx.recyclerview:recyclerview:1.3.2")
+    // Custom Tabs launch the device's real Chrome, which — unlike the WebView used for the
+    // YouTube player — actually supports Web Bluetooth, so "client mode" can reuse the exact
+    // same web app guests already use instead of reimplementing the BLE central role natively.
+    implementation("androidx.browser:browser:1.8.0")
 }
