@@ -313,23 +313,65 @@ class MainActivity : AppCompatActivity() {
         }
     }
 
-    /** Shared reparent-in/reparent-out helper for the music player and photo gallery fullscreen
-     *  buttons — moving the same View instance means playback/scroll state survives the trip. */
+    /**
+     * Shared reparent-in/reparent-out helper for the music player and photo gallery fullscreen
+     * buttons — moving the same View instance means playback/scroll state survives the trip.
+     *
+     * This deliberately does NOT use a Dialog (a separate window) — WebView ties its hardware
+     * rendering surface to the specific window it's attached to, and moving it into a Dialog's
+     * window and back leaves that surface stale, rendering solid black afterward even though
+     * playback/JS keeps running underneath. Overlaying within the Activity's own window instead
+     * (a full-screen sibling added to android.R.id.content) keeps the WebView in the same
+     * window throughout, which is the safe operation.
+     */
     private fun showFullscreenView(content: android.view.View) {
         val originalParent = content.parent as ViewGroup
         val originalIndex = originalParent.indexOfChild(content)
         val originalLayoutParams = content.layoutParams
         originalParent.removeView(content)
 
-        val dialog = Dialog(this, android.R.style.Theme_Black_NoTitleBar_Fullscreen)
-        val container = android.widget.FrameLayout(this)
-        container.addView(content, ViewGroup.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.MATCH_PARENT))
-        dialog.setContentView(container)
-        dialog.setOnDismissListener {
-            container.removeView(content)
+        val rootContent = window.decorView.findViewById<ViewGroup>(android.R.id.content)
+        val overlay = android.widget.FrameLayout(this)
+        overlay.setBackgroundColor(ContextCompat.getColor(this, R.color.background))
+        overlay.addView(content, ViewGroup.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.MATCH_PARENT))
+
+        // The Widget.BleLink.Button.Utility style targets MaterialButton attributes (stroke,
+        // backgroundTint) — XML <Button> tags get silently upgraded to MaterialButton by the
+        // Material theme's inflater, but a Button constructed directly in code would not, so
+        // build the real MaterialButton class here (via a themed wrapper applying the style)
+        // to get the same look.
+        val closeBtn = com.google.android.material.button.MaterialButton(
+            android.view.ContextThemeWrapper(this, R.style.Widget_BleLink_Button_Utility)
+        )
+        closeBtn.text = "✕"
+        closeBtn.contentDescription = "Close fullscreen"
+        val closeParams = android.widget.FrameLayout.LayoutParams(
+            resources.getDimensionPixelSize(R.dimen.fullscreen_close_button_size),
+            resources.getDimensionPixelSize(R.dimen.fullscreen_close_button_size)
+        )
+        closeParams.gravity = android.view.Gravity.TOP or android.view.Gravity.END
+        val margin = resources.getDimensionPixelSize(R.dimen.fullscreen_close_button_margin)
+        closeParams.topMargin = margin
+        closeParams.rightMargin = margin
+        overlay.addView(closeBtn, closeParams)
+
+        lateinit var backCallback: androidx.activity.OnBackPressedCallback
+        fun close() {
+            overlay.removeView(content)
+            rootContent.removeView(overlay)
             originalParent.addView(content, originalIndex, originalLayoutParams)
+            // Must remove itself on every path out (back button or the close button) — an
+            // OnBackPressedCallback doesn't auto-remove after firing, so leaving this out would
+            // permanently swallow every future back-press for the rest of the Activity's life.
+            backCallback.remove()
         }
-        dialog.show()
+        backCallback = object : androidx.activity.OnBackPressedCallback(true) {
+            override fun handleOnBackPressed() = close()
+        }
+        onBackPressedDispatcher.addCallback(this, backCallback)
+        closeBtn.setOnClickListener { close() }
+
+        rootContent.addView(overlay, ViewGroup.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.MATCH_PARENT))
     }
 
     private fun showFullscreenQr() {
