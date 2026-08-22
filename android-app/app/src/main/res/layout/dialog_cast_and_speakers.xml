@@ -1,0 +1,82 @@
+<?xml version="1.0" encoding="utf-8"?>
+<LinearLayout xmlns:android="http://schemas.android.com/apk/res/android"
+    xmlns:app="http://schemas.android.com/apk/res-auto"
+    android:layout_width="match_parent"
+    android:layout_height="wrap_content"
+    android:orientation="vertical"
+    android:padding="20dp">
+
+    <TextView
+        android:layout_width="wrap_content"
+        android:layout_height="wrap_content"
+        android:text="@string/cast_popup_title"
+        android:textStyle="bold"
+        android:textSize="17sp"
+        android:textColor="@color/on_background" />
+
+    <TextView
+        android:layout_width="wrap_content"
+        android:layout_height="wrap_content"
+        android:layout_marginTop="16dp"
+        android:text="@string/cast_to_tv_title"
+        android:textStyle="bold"
+        android:textSize="14sp"
+        android:textColor="@color/on_background" />
+
+    <TextView
+        android:layout_width="wrap_content"
+        android:layout_height="wrap_content"
+        android:layout_marginTop="2dp"
+        android:text="@string/cast_to_tv_explainer"
+        android:textSize="12sp"
+        android:lineSpacingExtra="2sp"
+        android:textColor="@color/on_surface_variant" />
+
+    <androidx.mediarouter.app.MediaRouteButton
+        android:id="@+id/mediaRouteButton"
+        android:layout_width="wrap_content"
+        android:layout_height="wrap_content"
+        android:layout_marginTop="8dp"
+        android:layout_gravity="start" />
+
+    <View
+        android:layout_width="match_parent"
+        android:layout_height="1dp"
+        android:layout_marginTop="14dp"
+        android:layout_marginBottom="14dp"
+        android:background="@color/outline" />
+
+    <TextView
+        android:layout_width="wrap_content"
+        android:layout_height="wrap_content"
+        android:text="@string/bluetooth_speakers_title"
+        android:textStyle="bold"
+        android:textSize="14sp"
+        android:textColor="@color/on_background" />
+
+    <TextView
+        android:layout_width="wrap_content"
+        android:layout_height="wrap_content"
+        android:layout_marginTop="2dp"
+        android:text="@string/bluetooth_speakers_explainer"
+        android:textSize="12sp"
+        android:lineSpacingExtra="2sp"
+        android:textColor="@color/on_surface_variant" />
+
+    <LinearLayout
+        android:id="@+id/bluetoothDeviceList"
+        android:layout_width="match_parent"
+        android:layout_height="wrap_content"
+        android:layout_marginTop="8dp"
+        android:orientation="vertical" />
+
+    <Button
+        android:id="@+id/openBluetoothSettingsBtn"
+        android:layout_width="match_parent"
+        android:layout_height="wrap_content"
+        android:layout_marginTop="10dp"
+        android:text="@string/open_bluetooth_settings"
+        android:textAllCaps="false"
+        style="@style/Widget.Material3.Button.TonalButton" />
+
+</LinearLayout>

@@ -1,6 +1,7 @@
 package com.blelink.app
 
 import android.annotation.SuppressLint
+import android.app.Dialog
 import android.bluetooth.*
 import android.bluetooth.le.AdvertiseCallback
 import android.bluetooth.le.AdvertiseData
@@ -17,16 +18,28 @@ import android.os.Handler
 import android.os.Looper
 import android.content.Intent
 import android.net.Uri
+import android.provider.Settings
+import android.view.ViewGroup
 import android.webkit.WebView
 import android.widget.ImageView
+import android.widget.TextView
 import androidx.activity.result.contract.ActivityResultContracts
 import androidx.appcompat.app.AppCompatActivity
 import androidx.browser.customtabs.CustomTabsIntent
 import androidx.core.content.ContextCompat
+import androidx.mediarouter.app.MediaRouteButton
 import androidx.recyclerview.widget.GridLayoutManager
 import com.blelink.app.databinding.ActivityMainBinding
+import com.google.android.gms.cast.framework.CastButtonFactory
+import com.google.android.gms.cast.framework.CastContext
+import com.google.android.material.bottomsheet.BottomSheetDialog
 import com.google.zxing.BarcodeFormat
 import com.google.zxing.qrcode.QRCodeWriter
+import com.pierfrancescosoffritti.androidyoutubeplayer.chromecast.chromecastsender.ChromecastYouTubePlayerContext
+import com.pierfrancescosoffritti.androidyoutubeplayer.chromecast.chromecastsender.io.infrastructure.ChromecastConnectionListener
+import com.pierfrancescosoffritti.androidyoutubeplayer.chromecast.chromecastsender.utils.PlayServicesUtils
+import com.pierfrancescosoffritti.androidyoutubeplayer.core.player.YouTubePlayer
+import com.pierfrancescosoffritti.androidyoutubeplayer.core.player.listeners.AbstractYouTubePlayerListener
 import org.json.JSONObject
 import java.io.IOException
 import java.net.Inet4Address
@@ -72,6 +85,8 @@ class MainActivity : AppCompatActivity() {
         // see nothing said before they connected. This is how many recent messages get replayed
         // to a newly connected guest instead.
         const val CHAT_HISTORY_LIMIT = 30
+
+        const val GOOGLE_PLAY_SERVICES_REQUEST_CODE = 1001
     }
 
     private lateinit var binding: ActivityMainBinding
@@ -85,6 +100,14 @@ class MainActivity : AppCompatActivity() {
     private var txCharacteristic: BluetoothGattCharacteristic? = null
     private var lanServer: LanServer? = null
     private var lastLanIp: String? = null
+
+    // Casting: the local WebView stays the single source of truth for the queue/history
+    // (unchanged); when a Cast session is connected, broadcastMusicSync's existing poll loop
+    // additionally mirrors playback state onto this player instead of building a parallel
+    // queue system for the TV.
+    private var chromecastYouTubePlayerContext: ChromecastYouTubePlayerContext? = null
+    private var castYouTubePlayer: YouTubePlayer? = null
+    private var lastCastVideoId: String? = null
 
     // Connected guests, regardless of transport (see Peer.kt), keyed by a transport-appropriate
     // id: the BLE device address, or a generated "lan-<uuid>" for a WebSocket connection.
@@ -144,10 +167,15 @@ class MainActivity : AppCompatActivity() {
 
         setUpYoutubePlayer()
         binding.openClientModeBtn.setOnClickListener { openClientMode() }
+        binding.openCastPopupBtn.setOnClickListener { showCastAndSpeakersPopup() }
+        binding.fullscreenQrBtn.setOnClickListener { showFullscreenQr() }
+        binding.fullscreenMusicBtn.setOnClickListener { showFullscreenView(binding.youtubePlayerWebView) }
+        binding.fullscreenPhotosBtn.setOnClickListener { showFullscreenView(binding.photoRecyclerView) }
 
         showQrInto(binding.qrImage, WEB_URL)
         startLanServer()
         startLanIpRefreshLoop()
+        setUpCasting()
         ContextCompat.startForegroundService(this, Intent(this, HostingForegroundService::class.java))
         requestPermissionsAndStart()
     }
@@ -168,6 +196,140 @@ class MainActivity : AppCompatActivity() {
         } catch (e: Exception) {
             startActivity(Intent(Intent.ACTION_VIEW, uri))
         }
+    }
+
+    /**
+     * Cast setup follows the chromecast-sender library's documented pattern exactly: check
+     * Play Services availability first (it can show its own fixing dialog, delivering the
+     * result back through onActivityResult), only then touch CastContext.
+     */
+    private fun setUpCasting() {
+        PlayServicesUtils.checkGooglePlayServicesAvailability(this, GOOGLE_PLAY_SERVICES_REQUEST_CODE) {
+            initChromecast()
+        }
+    }
+
+    override fun onActivityResult(requestCode: Int, resultCode: Int, data: Intent?) {
+        super.onActivityResult(requestCode, resultCode, data)
+        if (requestCode == GOOGLE_PLAY_SERVICES_REQUEST_CODE) {
+            PlayServicesUtils.checkGooglePlayServicesAvailability(this, GOOGLE_PLAY_SERVICES_REQUEST_CODE) {
+                initChromecast()
+            }
+        }
+    }
+
+    private fun initChromecast() {
+        chromecastYouTubePlayerContext = ChromecastYouTubePlayerContext(
+            CastContext.getSharedInstance(this).sessionManager,
+            object : ChromecastConnectionListener {
+                override fun onChromecastConnecting() {}
+
+                override fun onChromecastConnected(chromecastYouTubePlayerContext: ChromecastYouTubePlayerContext) {
+                    chromecastYouTubePlayerContext.initialize(object : AbstractYouTubePlayerListener() {
+                        override fun onReady(youTubePlayer: YouTubePlayer) {
+                            castYouTubePlayer = youTubePlayer
+                            lastCastVideoId = null
+                            // The queue keeps playing here too (it's still the source of truth
+                            // driving the sync loop) — just silently, so audio doesn't come out
+                            // of the phone and the TV at once.
+                            binding.youtubePlayerWebView.evaluateJavascript("mute()", null)
+                        }
+                    })
+                }
+
+                override fun onChromecastDisconnected() {
+                    castYouTubePlayer = null
+                    lastCastVideoId = null
+                    binding.youtubePlayerWebView.evaluateJavascript("unMute()", null)
+                }
+            }
+        )
+    }
+
+    /** Lists paired audio devices and hands off to Android's own Bluetooth settings for the
+     *  actual connect — third-party apps can't complete an A2DP connection themselves, that
+     *  needs BLUETOOTH_PRIVILEGED, which only system apps can hold. */
+    private fun showCastAndSpeakersPopup() {
+        val view = layoutInflater.inflate(R.layout.dialog_cast_and_speakers, null)
+        CastButtonFactory.setUpMediaRouteButton(this, view.findViewById(R.id.mediaRouteButton))
+        populateBluetoothDeviceList(view.findViewById(R.id.bluetoothDeviceList))
+
+        val dialog = BottomSheetDialog(this)
+        dialog.setContentView(view)
+        view.findViewById<android.widget.Button>(R.id.openBluetoothSettingsBtn).setOnClickListener {
+            startActivity(Intent(Settings.ACTION_BLUETOOTH_SETTINGS))
+            dialog.dismiss()
+        }
+        dialog.show()
+    }
+
+    @SuppressLint("MissingPermission")
+    private fun isAudioDevice(device: BluetoothDevice): Boolean {
+        val deviceClass = device.bluetoothClass ?: return false
+        if (deviceClass.hasService(BluetoothClass.Service.AUDIO)) return true
+        return when (deviceClass.deviceClass) {
+            BluetoothClass.Device.AUDIO_VIDEO_WEARABLE_HEADSET,
+            BluetoothClass.Device.AUDIO_VIDEO_HANDSFREE,
+            BluetoothClass.Device.AUDIO_VIDEO_LOUDSPEAKER,
+            BluetoothClass.Device.AUDIO_VIDEO_HEADPHONES,
+            BluetoothClass.Device.AUDIO_VIDEO_PORTABLE_AUDIO,
+            BluetoothClass.Device.AUDIO_VIDEO_CAR_AUDIO,
+            BluetoothClass.Device.AUDIO_VIDEO_HIFI_AUDIO -> true
+            else -> false
+        }
+    }
+
+    @SuppressLint("MissingPermission")
+    private fun populateBluetoothDeviceList(container: ViewGroup) {
+        container.removeAllViews()
+        val pairedAudioDevices = bluetoothAdapter?.bondedDevices?.filter { isAudioDevice(it) } ?: emptyList()
+
+        if (pairedAudioDevices.isEmpty()) {
+            val empty = TextView(this)
+            empty.text = getString(R.string.no_paired_speakers)
+            empty.setTextColor(ContextCompat.getColor(this, R.color.on_surface_variant))
+            empty.textSize = 13f
+            container.addView(empty)
+            return
+        }
+
+        for (device in pairedAudioDevices) {
+            val row = TextView(this)
+            row.text = "🔊 " + (device.name ?: device.address)
+            row.setTextColor(ContextCompat.getColor(this, R.color.on_background))
+            row.textSize = 14f
+            row.setPadding(0, 12, 0, 12)
+            container.addView(row)
+        }
+    }
+
+    /** Shared reparent-in/reparent-out helper for the music player and photo gallery fullscreen
+     *  buttons — moving the same View instance means playback/scroll state survives the trip. */
+    private fun showFullscreenView(content: android.view.View) {
+        val originalParent = content.parent as ViewGroup
+        val originalIndex = originalParent.indexOfChild(content)
+        val originalLayoutParams = content.layoutParams
+        originalParent.removeView(content)
+
+        val dialog = Dialog(this, android.R.style.Theme_Black_NoTitleBar_Fullscreen)
+        val container = android.widget.FrameLayout(this)
+        container.addView(content, ViewGroup.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.MATCH_PARENT))
+        dialog.setContentView(container)
+        dialog.setOnDismissListener {
+            container.removeView(content)
+            originalParent.addView(content, originalIndex, originalLayoutParams)
+        }
+        dialog.show()
+    }
+
+    private fun showFullscreenQr() {
+        val view = layoutInflater.inflate(R.layout.dialog_fullscreen_qr, null)
+        view.findViewById<ImageView>(R.id.fullscreenQrImageBluetooth).setImageDrawable(binding.qrImage.drawable)
+        view.findViewById<ImageView>(R.id.fullscreenQrImageWifi).setImageDrawable(binding.lanQrImage.drawable)
+
+        val dialog = Dialog(this, android.R.style.Theme_Black_NoTitleBar_Fullscreen)
+        dialog.setContentView(view)
+        dialog.show()
     }
 
     @SuppressLint("SetJavaScriptEnabled")
@@ -209,7 +371,6 @@ class MainActivity : AppCompatActivity() {
 
     private fun broadcastMusicSync(rawJson: String?) {
         if (rawJson.isNullOrEmpty() || rawJson == "null") return
-        if (connectedPeers.isEmpty()) return
         // evaluateJavascript's callback hands back a JSON-encoded *string* (quotes escaped);
         // unwrap it once to get the actual JSON object payload it contains.
         val json = try {
@@ -219,11 +380,20 @@ class MainActivity : AppCompatActivity() {
         }
         val videoId = json.optString("videoId", "")
         if (!youtubeIdPattern.matches(videoId)) return
+        val position = json.optDouble("position", 0.0)
+        val playing = json.optBoolean("playing", false)
+
+        // Drives the TV the same way this loop already drives every BLE/LAN "Join Audio"
+        // guest — the Cast player is just one more recipient of the same state, not a
+        // parallel queue system.
+        applyCastSyncState(videoId, position, playing)
+
+        if (connectedPeers.isEmpty()) return
 
         val payload = JSONObject()
         payload.put("v", videoId)
-        payload.put("p", json.optDouble("position", 0.0))
-        payload.put("pl", json.optBoolean("playing", false))
+        payload.put("p", position)
+        payload.put("pl", playing)
         val bytes = payload.toString().toByteArray(Charsets.UTF_8)
 
         val syncId = nextMusicMsgId()
@@ -235,6 +405,25 @@ class MainActivity : AppCompatActivity() {
                 syncId, bytes
             )
         }
+    }
+
+    /**
+     * Mirrors the phone's playback state onto the connected Cast session, if any. v1 keeps
+     * this simple: load the video (with its current position as the start point) whenever it
+     * changes, and just reissue play/pause each tick otherwise — no periodic drift-correcting
+     * seek like the web client's applySyncState() does for BLE/LAN guests, since reading the
+     * Cast player's own current position back needs a YouTubePlayerTracker listener this v1
+     * doesn't wire up. Good enough for "the right video is playing/paused on the TV."
+     */
+    private fun applyCastSyncState(videoId: String, position: Double, playing: Boolean) {
+        val player = castYouTubePlayer ?: return
+        if (videoId != lastCastVideoId) {
+            lastCastVideoId = videoId
+            player.loadVideo(videoId, position.toFloat())
+            if (!playing) player.pause()
+            return
+        }
+        if (playing) player.play() else player.pause()
     }
 
     private fun showQrInto(imageView: ImageView, content: String) {

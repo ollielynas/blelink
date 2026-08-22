@@ -51,6 +51,14 @@ dependencies {
     // unlike a Web Bluetooth client connecting to the phone's own GATT server).
     implementation("org.nanohttpd:nanohttpd:2.3.1")
     implementation("org.nanohttpd:nanohttpd-websocket:2.3.1")
+    // Casts the queued YouTube video to a TV. Real Google Cast SDK integration — device
+    // discovery and session management — driven by an open-source library that talks to our
+    // own custom Cast receiver (docs/chromecast-receiver/, running YouTube's IFrame Player API,
+    // same technique youtube_player.html already uses locally). This is standard Cast
+    // Application Framework usage, not a hack against YouTube's native Chromecast app.
+    implementation("com.google.android.gms:play-services-cast-framework:22.3.1")
+    implementation("androidx.mediarouter:mediarouter:1.8.1")
+    implementation("com.pierfrancescosoffritti.androidyoutubeplayer:chromecast-sender:0.31")
 }
 
 // docs/index.html is the single source of truth for the guest web app; copy it into assets at

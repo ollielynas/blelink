@@ -20,4 +20,18 @@
     <string name="client_mode_button">View</string>
 
     <string name="hosting_notification_text">Guests can connect over Bluetooth or Wi-Fi</string>
+
+    <string name="fullscreen_button">⛶</string>
+    <string name="fullscreen_qr_description">View QR codes fullscreen</string>
+    <string name="fullscreen_music_description">View music player fullscreen</string>
+    <string name="fullscreen_photos_description">View photo gallery fullscreen</string>
+
+    <string name="cast_button">📺</string>
+    <string name="cast_popup_title">Cast &amp; speakers</string>
+    <string name="cast_to_tv_title">Cast to TV</string>
+    <string name="cast_to_tv_explainer">Plays the music queue on a Chromecast-compatible TV instead of this phone.</string>
+    <string name="bluetooth_speakers_title">Bluetooth speakers</string>
+    <string name="bluetooth_speakers_explainer">Apps can\'t connect a speaker directly — pick one below to open Bluetooth settings and finish connecting there.</string>
+    <string name="no_paired_speakers">No paired Bluetooth audio devices found</string>
+    <string name="open_bluetooth_settings">Open Bluetooth settings</string>
 </resources>

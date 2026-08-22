@@ -10,4 +10,17 @@
         <item name="android:statusBarColor">@color/surface</item>
         <item name="android:windowLightStatusBar">true</item>
     </style>
+
+    <!-- Compact utility buttons (fullscreen toggles, "View", "Cast & speakers") — outlined to
+         match the app's card style (cream surface + dark outline) instead of Material3's
+         TonalButton, which pulls an undefined secondary-container color that renders as a
+         dark navy/purple clashing with the rest of the light, warm palette. -->
+    <style name="Widget.BleLink.Button.Utility" parent="Widget.Material3.Button.OutlinedButton">
+        <item name="strokeColor">@color/outline</item>
+        <item name="strokeWidth">2dp</item>
+        <item name="backgroundTint">@color/surface</item>
+        <item name="android:textColor">@color/on_background</item>
+        <item name="iconTint">@color/on_background</item>
+        <item name="rippleColor">@color/outline</item>
+    </style>
 </resources>

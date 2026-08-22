@@ -74,6 +74,16 @@
     }
     return { videoId: currentVideoId, position: player.getCurrentTime(), playing: isPlaying };
   }
+
+  // Called from MainActivity.kt while casting to a TV, so audio doesn't come out of the phone
+  // and the TV at the same time — the video keeps playing here (still driving the queue/sync
+  // loop), just silently.
+  function mute() {
+    if (player && typeof player.mute === 'function') player.mute();
+  }
+  function unMute() {
+    if (player && typeof player.unMute === 'function') player.unMute();
+  }
 </script>
 </body>
 </html>

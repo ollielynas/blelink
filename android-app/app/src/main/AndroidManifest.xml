@@ -43,6 +43,11 @@
             android:name=".HostingForegroundService"
             android:foregroundServiceType="connectedDevice"
             android:exported="false" />
+
+        <!-- Required by the Cast SDK — see CastOptionsProvider.kt. -->
+        <meta-data
+            android:name="com.google.android.gms.cast.framework.OPTIONS_PROVIDER_CLASS_NAME"
+            android:value="com.blelink.app.CastOptionsProvider" />
     </application>
 
 </manifest>
