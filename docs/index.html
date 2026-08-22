@@ -278,6 +278,59 @@
     border-radius: 10px 10px 2px 10px;
   }
 
+  .chat-bubble-image {
+    display: block;
+    max-width: 100%;
+    max-height: 200px;
+    border-radius: 8px;
+    margin-top: 4px;
+  }
+
+  .chat-bubble-file {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    margin-top: 4px;
+    padding: 6px 8px;
+    border-radius: 8px;
+    background: rgba(0, 0, 0, 0.06);
+  }
+
+  .chat-bubble.mine .chat-bubble-file {
+    background: rgba(255, 255, 255, 0.18);
+  }
+
+  .chat-bubble-file-icon {
+    font-size: 18px;
+    flex-shrink: 0;
+  }
+
+  .chat-bubble-file-info {
+    flex: 1;
+    min-width: 0;
+  }
+
+  .chat-bubble-file-name {
+    font-weight: 800;
+    font-size: 12px;
+    white-space: nowrap;
+    overflow: hidden;
+    text-overflow: ellipsis;
+  }
+
+  .chat-bubble-file-size {
+    font-size: 10px;
+    opacity: 0.75;
+  }
+
+  .chat-bubble-file-download {
+    flex-shrink: 0;
+    font-size: 11px;
+    font-weight: 800;
+    text-decoration: underline;
+    color: inherit;
+  }
+
   .chat-input-row {
     display: flex;
     gap: 8px;
@@ -292,6 +345,11 @@
     width: auto;
     padding: 10px 16px;
     background: var(--accent-2);
+  }
+
+  .attach-btn {
+    padding: 10px 12px;
+    flex-shrink: 0;
   }
 
   .music-results {
@@ -432,10 +490,16 @@
 
       <div id="chatBody" hidden>
         <div class="chat-messages" id="chatMessages"></div>
+        <div class="progress-wrap" id="fileProgressWrap" hidden>
+          <div class="progress-track"><div class="progress-fill" id="fileProgressFill"></div></div>
+          <div class="progress-label" id="fileProgressLabel"></div>
+        </div>
         <div class="chat-input-row">
+          <button type="button" id="chatAttachBtn" class="inline-btn attach-btn" disabled title="Attach a file">📎</button>
           <input id="chatInput" class="text-input" type="text" placeholder="Message everyone…" maxlength="200" disabled />
           <button id="chatSend" class="inline-btn" disabled>Send</button>
         </div>
+        <input id="chatFileInput" type="file" hidden />
       </div>
     </div>
 
@@ -487,6 +551,15 @@
     const OP_CHAT_RECV_DATA = 0x93;
     const OP_CHAT_RECV_END = 0x94;
 
+    const OP_FILE_SEND = 0x40;
+    const OP_FILE_SEND_DATA = 0x41;
+    const OP_FILE_SEND_END = 0x42;
+    const OP_FILE_ACK = 0x85;
+
+    const OP_FILE_RECV = 0x95;
+    const OP_FILE_RECV_DATA = 0x96;
+    const OP_FILE_RECV_END = 0x97;
+
     const OP_MUSIC_QUEUE = 0x33;
     const OP_MUSIC_QUEUE_DATA = 0x34;
     const OP_MUSIC_QUEUE_END = 0x35;
@@ -532,6 +605,11 @@
     const CHAT_NAME_SEPARATOR = ''; // joins "name" + sep + "text" in the chat wire payload
     const ACK_TIMEOUT_MS = 10_000;
 
+    // Images attached to chat get the same compression as the Photos tab, so they transfer
+    // quickly; anything else goes over raw, capped well under the Android-side hard limit
+    // (1,500,000) so there's room for the small JSON header without ever tripping ERR_TOO_LARGE.
+    const MAX_CHAT_FILE_BYTES = 1_400_000;
+
     const statusEl = document.getElementById('status');
     const statusPillEl = document.getElementById('statusPill');
     const progressWrapEl = document.getElementById('progressWrap');
@@ -555,6 +633,11 @@
     const chatMessagesEl = document.getElementById('chatMessages');
     const chatInput = document.getElementById('chatInput');
     const chatSendBtn = document.getElementById('chatSend');
+    const chatAttachBtn = document.getElementById('chatAttachBtn');
+    const chatFileInput = document.getElementById('chatFileInput');
+    const fileProgressWrapEl = document.getElementById('fileProgressWrap');
+    const fileProgressFillEl = document.getElementById('fileProgressFill');
+    const fileProgressLabelEl = document.getElementById('fileProgressLabel');
 
     const musicScreenEl = document.getElementById('musicScreen');
     const openMusicBtn = document.getElementById('openMusic');
@@ -574,11 +657,14 @@
 
     let transferIdCounter = 0;
     let chatMsgIdCounter = 0;
+    let fileMsgIdCounter = 0;
     let musicMsgIdCounter = 0;
     const pendingPhotoAcks = new Map(); // transferId -> { resolve, reject, timer }
     const pendingChatAcks = new Map(); // msgId -> { resolve, reject, timer }
+    const pendingFileAcks = new Map(); // msgId -> { resolve, reject, timer }
     const pendingQueueAcks = new Map(); // msgId -> { resolve, reject, timer }
     let chatRecvBuffer = null; // { msgId, expected, chunks: [] } for the in-flight incoming broadcast
+    let fileRecvBuffer = null; // same shape, for the in-flight incoming file relay
     let musicQueueRecvBuffer = null; // same shape, for the in-flight incoming "queued" relay
     let musicSyncRecvBuffer = null; // same shape, for the in-flight incoming sync-state broadcast
 
@@ -621,6 +707,22 @@
       progressWrapEl.hidden = false;
       progressLabelEl.textContent = label;
       progressFillEl.style.width = (percent ?? 0) + '%';
+    }
+
+    function setFileProgress(label, percent) {
+      if (label == null) {
+        fileProgressWrapEl.hidden = true;
+        return;
+      }
+      fileProgressWrapEl.hidden = false;
+      fileProgressLabelEl.textContent = label;
+      fileProgressFillEl.style.width = (percent ?? 0) + '%';
+    }
+
+    function formatFileSize(bytes) {
+      if (bytes < 1024) return bytes + ' B';
+      if (bytes < 1024 * 1024) return (bytes / 1024).toFixed(1) + ' KB';
+      return (bytes / (1024 * 1024)).toFixed(1) + ' MB';
     }
 
     function showMenu() {
@@ -717,6 +819,7 @@
         takePhotoBtn.disabled = false;
         chatInput.disabled = false;
         chatSendBtn.disabled = false;
+        chatAttachBtn.disabled = false;
       } catch (err) {
         setStatus('Error: ' + err.message, 'error');
         console.error(err);
@@ -729,13 +832,15 @@
       takePhotoBtn.disabled = true;
       chatInput.disabled = true;
       chatSendBtn.disabled = true;
+      chatAttachBtn.disabled = true;
       rxCharacteristic = null;
       chatRecvBuffer = null;
+      fileRecvBuffer = null;
       musicQueueRecvBuffer = null;
       musicSyncRecvBuffer = null;
       stopPingLoop();
       estimatedLatencySeconds = 0;
-      for (const map of [pendingPhotoAcks, pendingChatAcks, pendingQueueAcks]) {
+      for (const map of [pendingPhotoAcks, pendingChatAcks, pendingFileAcks, pendingQueueAcks]) {
         for (const [, entry] of map) {
           clearTimeout(entry.timer);
           entry.reject(new Error('disconnected'));
@@ -806,6 +911,38 @@
         const senderName = sep >= 0 ? raw.slice(0, sep) : 'Guest';
         const messageText = sep >= 0 ? raw.slice(sep + 1) : raw;
         addChatBubble(senderName, messageText, false);
+      } else if (opcode === OP_FILE_ACK) {
+        handleAck(value, pendingFileAcks);
+      } else if (opcode === OP_FILE_RECV) {
+        const { id, length } = parseLenFrame(value);
+        fileRecvBuffer = { msgId: id, expected: length, chunks: [] };
+      } else if (opcode === OP_FILE_RECV_DATA) {
+        if (!fileRecvBuffer) return;
+        const { id, payload } = parseDataFrame(value);
+        if (id !== fileRecvBuffer.msgId) return;
+        fileRecvBuffer.chunks.push(payload);
+      } else if (opcode === OP_FILE_RECV_END) {
+        if (!fileRecvBuffer) return;
+        const { id } = parseLenFrame(value);
+        const buffered = fileRecvBuffer;
+        fileRecvBuffer = null;
+        if (id !== buffered.msgId) return;
+        const totalLen = buffered.chunks.reduce((n, c) => n + c.length, 0);
+        const merged = new Uint8Array(totalLen);
+        let off = 0;
+        for (const chunk of buffered.chunks) {
+          merged.set(chunk, off);
+          off += chunk.length;
+        }
+        try {
+          const headerLen = new DataView(merged.buffer, merged.byteOffset, merged.byteLength).getUint16(0, false);
+          const header = JSON.parse(new TextDecoder().decode(merged.subarray(2, 2 + headerLen)));
+          const fileBytes = merged.subarray(2 + headerLen);
+          const blob = new Blob([fileBytes], { type: header.m || 'application/octet-stream' });
+          addFileBubble(header.s || 'Guest', header.n || 'file', header.m || '', URL.createObjectURL(blob), fileBytes.length, false);
+        } catch (err) {
+          log('failed to parse received file: ' + err.message);
+        }
       } else if (opcode === OP_MUSIC_QUEUE_ACK) {
         handleAck(value, pendingQueueAcks, MUSIC_QUEUE_STATUS_NAMES);
       } else if (opcode === OP_MUSIC_QUEUE_RECV) {
@@ -896,6 +1033,11 @@
     function nextChatMsgId() {
       chatMsgIdCounter = (chatMsgIdCounter + 1) % 256;
       return chatMsgIdCounter;
+    }
+
+    function nextFileMsgId() {
+      fileMsgIdCounter = (fileMsgIdCounter + 1) % 256;
+      return fileMsgIdCounter;
     }
 
     function nextMusicMsgId() {
@@ -1062,6 +1204,110 @@
     chatSendBtn.addEventListener('click', sendChatMessage);
     chatInput.addEventListener('keydown', (e) => {
       if (e.key === 'Enter') sendChatMessage();
+    });
+
+    // Renders a shared file inline in the chat: an <img> for images, otherwise a small
+    // file card with a name/size and a download link, mirroring addChatBubble's layout.
+    function addFileBubble(name, fileName, mime, blobUrl, sizeBytes, mine) {
+      const bubble = document.createElement('div');
+      bubble.className = 'chat-bubble' + (mine ? ' mine' : '');
+
+      const nameEl = document.createElement('div');
+      nameEl.className = 'chat-bubble-name';
+      nameEl.textContent = name;
+      bubble.appendChild(nameEl);
+
+      if (mime.startsWith('image/')) {
+        const img = document.createElement('img');
+        img.className = 'chat-bubble-image';
+        img.src = blobUrl;
+        img.alt = fileName;
+        bubble.appendChild(img);
+      } else {
+        const card = document.createElement('div');
+        card.className = 'chat-bubble-file';
+
+        const icon = document.createElement('span');
+        icon.className = 'chat-bubble-file-icon';
+        icon.textContent = '📄';
+        card.appendChild(icon);
+
+        const info = document.createElement('div');
+        info.className = 'chat-bubble-file-info';
+        const nameLine = document.createElement('div');
+        nameLine.className = 'chat-bubble-file-name';
+        nameLine.textContent = fileName;
+        const sizeLine = document.createElement('div');
+        sizeLine.className = 'chat-bubble-file-size';
+        sizeLine.textContent = formatFileSize(sizeBytes);
+        info.appendChild(nameLine);
+        info.appendChild(sizeLine);
+        card.appendChild(info);
+
+        const download = document.createElement('a');
+        download.className = 'chat-bubble-file-download';
+        download.href = blobUrl;
+        download.download = fileName;
+        download.textContent = 'Save';
+        card.appendChild(download);
+
+        bubble.appendChild(card);
+      }
+
+      chatMessagesEl.appendChild(bubble);
+      chatMessagesEl.scrollTop = chatMessagesEl.scrollHeight;
+    }
+
+    async function sendChatFile(file) {
+      const isImage = file.type.startsWith('image/');
+      let fileBytes;
+      let mime;
+      if (isImage) {
+        const blob = await compressImage(file);
+        fileBytes = new Uint8Array(await blob.arrayBuffer());
+        mime = 'image/jpeg';
+      } else {
+        if (file.size > MAX_CHAT_FILE_BYTES) {
+          throw new Error(`file too large (max ${formatFileSize(MAX_CHAT_FILE_BYTES)})`);
+        }
+        fileBytes = new Uint8Array(await file.arrayBuffer());
+        mime = file.type || 'application/octet-stream';
+      }
+
+      const header = new TextEncoder().encode(JSON.stringify({ n: file.name, m: mime, s: myName }));
+      const payload = new Uint8Array(2 + header.length + fileBytes.length);
+      new DataView(payload.buffer).setUint16(0, header.length, false);
+      payload.set(header, 2);
+      payload.set(fileBytes, 2 + header.length);
+
+      const msgId = nextFileMsgId();
+      await sendChunked(OP_FILE_SEND, OP_FILE_SEND_DATA, OP_FILE_SEND_END, msgId, payload, (offset, total) => {
+        setFileProgress('Sending file…', Math.round((offset / total) * 100));
+      });
+      await waitForAckIn(pendingFileAcks, msgId);
+
+      const blobUrl = URL.createObjectURL(new Blob([fileBytes], { type: mime }));
+      addFileBubble('You', file.name, mime, blobUrl, fileBytes.length, true);
+    }
+
+    chatAttachBtn.addEventListener('click', () => chatFileInput.click());
+    chatFileInput.addEventListener('change', async () => {
+      const file = chatFileInput.files[0];
+      chatFileInput.value = '';
+      if (!file || !rxCharacteristic || !myName) return;
+
+      chatAttachBtn.disabled = true;
+      try {
+        setFileProgress('Preparing…', 0);
+        await sendChatFile(file);
+        setFileProgress('Sent ✓', 100);
+        setTimeout(() => setFileProgress(null), 1500);
+      } catch (err) {
+        setFileProgress(null);
+        log('file send failed: ' + err.message);
+      } finally {
+        chatAttachBtn.disabled = !rxCharacteristic;
+      }
     });
 
     // Search runs entirely client-side against YouTube's public Data API — no BLE needed,

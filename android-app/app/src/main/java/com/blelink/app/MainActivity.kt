@@ -71,8 +71,10 @@ class MainActivity : AppCompatActivity() {
     private val connectedDevices = ConcurrentHashMap<String, DeviceState>()
     private val photoReceiveStates = ConcurrentHashMap<String, PhotoReceiveState>()
     private val chatReceiveStates = ConcurrentHashMap<String, ChatReceiveState>()
+    private val fileReceiveStates = ConcurrentHashMap<String, FileReceiveState>()
     private val musicQueueReceiveStates = ConcurrentHashMap<String, MusicReceiveState>()
     private var chatMsgIdCounter = 0
+    private var fileMsgIdCounter = 0
     private var musicMsgIdCounter = 0
 
     // YouTube video ids are always exactly this shape; validated before ever reaching the
@@ -83,6 +85,9 @@ class MainActivity : AppCompatActivity() {
     // Serializes chat relaying so a single browser never receives interleaved
     // DATA frames from two different chat messages on the same characteristic.
     private val chatExecutor = Executors.newSingleThreadExecutor()
+    // Separate from chatExecutor so a large file relay never blocks plain text chat messages
+    // (or vice versa) from going out promptly.
+    private val fileExecutor = Executors.newSingleThreadExecutor()
 
     private val permissionLauncher =
         registerForActivityResult(ActivityResultContracts.RequestMultiplePermissions()) { results ->
@@ -327,6 +332,7 @@ class MainActivity : AppCompatActivity() {
                     connectedDevices.remove(device.address)
                     photoReceiveStates.remove(device.address)
                     chatReceiveStates.remove(device.address)
+                    fileReceiveStates.remove(device.address)
                     musicQueueReceiveStates.remove(device.address)
                 }
             }
@@ -354,6 +360,9 @@ class MainActivity : AppCompatActivity() {
                     ChatProtocol.OP_CHAT_SEND -> handleChatStart(device, value)
                     ChatProtocol.OP_CHAT_SEND_DATA -> handleChatData(device, value)
                     ChatProtocol.OP_CHAT_SEND_END -> handleChatEnd(device, value)
+                    FileProtocol.OP_FILE_SEND -> handleFileStart(device, value)
+                    FileProtocol.OP_FILE_SEND_DATA -> handleFileData(device, value)
+                    FileProtocol.OP_FILE_SEND_END -> handleFileEnd(device, value)
                     MusicProtocol.OP_MUSIC_QUEUE -> handleMusicQueueStart(device, value)
                     MusicProtocol.OP_MUSIC_QUEUE_DATA -> handleMusicQueueData(device, value)
                     MusicProtocol.OP_MUSIC_QUEUE_END -> handleMusicQueueEnd(device, value)
@@ -494,11 +503,64 @@ class MainActivity : AppCompatActivity() {
         }
     }
 
+    private fun handleFileStart(device: BluetoothDevice, value: ByteArray) {
+        val start = FileProtocol.parseStart(value) ?: return
+        if (start.totalLength > FileProtocol.MAX_FILE_BYTES) {
+            sendFileAck(device, start.msgId, FileProtocol.STATUS_ERR_TOO_LARGE)
+            return
+        }
+        fileReceiveStates[device.address] = FileReceiveState(start.msgId, start.totalLength)
+    }
+
+    private fun handleFileData(device: BluetoothDevice, value: ByteArray) {
+        val data = FileProtocol.parseData(value) ?: return
+        val state = fileReceiveStates[device.address] ?: return
+        if (data.msgId != state.msgId) return
+        state.append(data.payload)
+    }
+
+    private fun handleFileEnd(device: BluetoothDevice, value: ByteArray) {
+        val end = FileProtocol.parseEnd(value) ?: return
+        val state = fileReceiveStates[device.address] ?: return
+        if (end.msgId != state.msgId) return
+
+        if (state.buffer.size() != end.totalLength) {
+            sendFileAck(device, end.msgId, FileProtocol.STATUS_ERR_LENGTH_MISMATCH)
+            fileReceiveStates.remove(device.address)
+            return
+        }
+
+        val bytes = state.toByteArray()
+        fileReceiveStates.remove(device.address)
+        val senderAddress = device.address
+
+        sendFileAck(device, end.msgId, FileProtocol.STATUS_OK)
+        appendLog("file relay: ${bytes.size} bytes")
+
+        fileExecutor.execute {
+            broadcastFile(excludeAddress = senderAddress, bytes = bytes)
+        }
+    }
+
+    /** Relays a shared file to every connected device except the original sender. */
+    private fun broadcastFile(excludeAddress: String, bytes: ByteArray) {
+        val msgId = nextFileMsgId()
+        for ((address, state) in connectedDevices) {
+            if (address == excludeAddress) continue
+            if (!state.notificationsEnabled) continue
+            sendFramedToDevice(
+                state.device, state.mtu,
+                FileProtocol.OP_FILE_RECV, FileProtocol.OP_FILE_RECV_DATA, FileProtocol.OP_FILE_RECV_END,
+                msgId, bytes
+            )
+        }
+    }
+
     /**
      * Chunked send of one id+bytes payload to a single device as opStart/opData/opEnd
      * frames, sized to the device's actual negotiated MTU when known (falls back to the
      * guaranteed-safe unnegotiated default: 23-byte ATT MTU, 3-byte header, 20 usable).
-     * Shared by chat relay and music search results.
+     * Shared by chat relay, file relay, and music search results.
      */
     private fun sendFramedToDevice(
         device: BluetoothDevice,
@@ -545,6 +607,12 @@ class MainActivity : AppCompatActivity() {
     private fun nextChatMsgId(): Byte {
         chatMsgIdCounter = (chatMsgIdCounter + 1) % 256
         return chatMsgIdCounter.toByte()
+    }
+
+    @Synchronized
+    private fun nextFileMsgId(): Byte {
+        fileMsgIdCounter = (fileMsgIdCounter + 1) % 256
+        return fileMsgIdCounter.toByte()
     }
 
     @Synchronized
@@ -628,6 +696,11 @@ class MainActivity : AppCompatActivity() {
     }
 
     @SuppressLint("MissingPermission")
+    private fun sendFileAck(device: BluetoothDevice, msgId: Byte, status: Byte) {
+        notifyDevice(device, FileProtocol.buildAck(msgId, status))
+    }
+
+    @SuppressLint("MissingPermission")
     private fun notifyDevice(device: BluetoothDevice, payload: ByteArray) {
         val server = gattServer ?: return
         val characteristic = txCharacteristic ?: return
@@ -662,6 +735,7 @@ class MainActivity : AppCompatActivity() {
         gattServer?.close()
         decodeExecutor.shutdown()
         chatExecutor.shutdown()
+        fileExecutor.shutdown()
         mainHandler.removeCallbacksAndMessages(null)
     }
 }
