@@ -102,6 +102,9 @@ class MainActivity : AppCompatActivity() {
     // Separate from chatExecutor so a large file relay never blocks plain text chat messages
     // (or vice versa) from going out promptly.
     private val fileExecutor = Executors.newSingleThreadExecutor()
+    // Every LAN WebSocket send hops through here — see sendToPeer — since it's a blocking
+    // socket write and callers include the main thread (the music sync loop).
+    private val lanSendExecutor = Executors.newSingleThreadExecutor()
 
     private val permissionLauncher =
         registerForActivityResult(ActivityResultContracts.RequestMultiplePermissions()) { results ->
@@ -136,6 +139,7 @@ class MainActivity : AppCompatActivity() {
         showQrInto(binding.qrImage, WEB_URL)
         startLanServer()
         startLanIpRefreshLoop()
+        ContextCompat.startForegroundService(this, Intent(this, HostingForegroundService::class.java))
         requestPermissionsAndStart()
     }
 
@@ -294,7 +298,12 @@ class MainActivity : AppCompatActivity() {
             onPeerClose = { peerId -> onPeerDisconnected(peerId) }
         )
         try {
-            server.start(fi.iki.elonen.NanoHTTPD.SOCKET_READ_TIMEOUT, false)
+            // NanoHTTPD.SOCKET_READ_TIMEOUT (5s) is meant for a normal short-lived HTTP
+            // request/response — applied here it was closing every WebSocket connection the
+            // moment it sat idle for 5 seconds between messages (which is normal; the ping
+            // loop alone only fires every 10s), causing constant "could not reach the phone"
+            // disconnects. 0 means no read timeout — Java's standard "block indefinitely".
+            server.start(0, false)
             lanServer = server
         } catch (e: IOException) {
             appendLog("LAN server failed to start: ${e.message}")
@@ -302,15 +311,22 @@ class MainActivity : AppCompatActivity() {
     }
 
     private fun requiredPermissions(): Array<String> {
-        return if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.S) {
-            arrayOf(
+        val permissions = mutableListOf<String>()
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.S) {
+            permissions += listOf(
                 android.Manifest.permission.BLUETOOTH_ADVERTISE,
                 android.Manifest.permission.BLUETOOTH_CONNECT,
                 android.Manifest.permission.BLUETOOTH_SCAN
             )
         } else {
-            arrayOf(android.Manifest.permission.ACCESS_FINE_LOCATION)
+            permissions += android.Manifest.permission.ACCESS_FINE_LOCATION
         }
+        // Without this the hosting notification is silently suppressed (though the foreground
+        // service itself still starts and still protects the process from being killed).
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) {
+            permissions += android.Manifest.permission.POST_NOTIFICATIONS
+        }
+        return permissions.toTypedArray()
     }
 
     private fun requestPermissionsAndStart() {
@@ -840,10 +856,16 @@ class MainActivity : AppCompatActivity() {
                 }
             }
             is Peer.Lan -> {
-                try {
-                    peer.socket.send(payload)
-                } catch (e: IOException) {
-                    // Guest likely disconnected; the WebSocket's onClose will clean the peer up shortly.
+                // socket.send() does a blocking write, and this function gets called from the
+                // main thread too (e.g. the music sync loop, driven by the WebView's JS bridge
+                // callback) — Android crashes with NetworkOnMainThreadException if that happens
+                // directly, so always hop onto a background executor for the actual write.
+                lanSendExecutor.execute {
+                    try {
+                        peer.socket.send(payload)
+                    } catch (e: IOException) {
+                        // Guest likely disconnected; the WebSocket's onClose will clean the peer up shortly.
+                    }
                 }
             }
         }
@@ -863,9 +885,11 @@ class MainActivity : AppCompatActivity() {
         advertiser?.stopAdvertising(advertiseCallback)
         gattServer?.close()
         lanServer?.stop()
+        stopService(Intent(this, HostingForegroundService::class.java))
         decodeExecutor.shutdown()
         chatExecutor.shutdown()
         fileExecutor.shutdown()
+        lanSendExecutor.shutdown()
         mainHandler.removeCallbacksAndMessages(null)
     }
 }

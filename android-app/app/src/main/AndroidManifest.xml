@@ -13,16 +13,15 @@
     <uses-permission android:name="android.permission.BLUETOOTH_ADMIN" android:maxSdkVersion="30" />
     <uses-permission android:name="android.permission.ACCESS_FINE_LOCATION" android:maxSdkVersion="30" />
 
-    <!-- For the embedded YouTube player (WebView loads youtube.com content). -->
+    <!-- For the embedded YouTube player (WebView loads youtube.com content) and the LAN server. -->
     <uses-permission android:name="android.permission.INTERNET" />
 
-    <!-- Android 11+ hides other installed apps from PackageManager queries by default (package
-         visibility filtering). Without this, isPackageInstalled("com.android.chrome") in client
-         mode always reports "not installed" even when Chrome is present, so it silently falls
-         back to whatever the default browser is — which may not support Web Bluetooth at all. -->
-    <queries>
-        <package android:name="com.android.chrome" />
-    </queries>
+    <!-- Keeps the process alive while hosting — see HostingForegroundService. Without this,
+         Android (especially aggressive OEM battery managers) can kill the whole process once
+         MainActivity is backgrounded, silently taking the BLE/LAN servers down with it. -->
+    <uses-permission android:name="android.permission.FOREGROUND_SERVICE" />
+    <uses-permission android:name="android.permission.FOREGROUND_SERVICE_CONNECTED_DEVICE" />
+    <uses-permission android:name="android.permission.POST_NOTIFICATIONS" />
 
     <application
         android:allowBackup="true"
@@ -39,6 +38,11 @@
                 <category android:name="android.intent.category.LAUNCHER" />
             </intent-filter>
         </activity>
+
+        <service
+            android:name=".HostingForegroundService"
+            android:foregroundServiceType="connectedDevice"
+            android:exported="false" />
     </application>
 
 </manifest>

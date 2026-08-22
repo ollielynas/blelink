@@ -87,7 +87,16 @@
     font-weight: 800;
     text-transform: uppercase;
     letter-spacing: 0.04em;
-    white-space: nowrap;
+    min-width: 0;
+  }
+
+  .pill .dot {
+    flex-shrink: 0;
+  }
+
+  #status {
+    white-space: normal;
+    word-break: break-word;
   }
 
   .pill.connected { background: var(--success); color: var(--on-accent); }
@@ -863,6 +872,29 @@
       chatAttachBtn.disabled = false;
     }
 
+    // LAN mode has no user-gesture-gated device picker the way Web Bluetooth's requestDevice()
+    // does — it's just a WebSocket to a known same-origin address — so there's no reason to
+    // make the guest tap Connect first. Auto-connect on load; the button still works as a
+    // manual retry (on failure) or a disconnect toggle (once connected).
+    async function connectLan() {
+      try {
+        setStatus('Connecting…');
+        const socket = new WebSocket('ws://' + location.host + LAN_WS_PATH);
+        socket.binaryType = 'arraybuffer';
+        await new Promise((resolve, reject) => {
+          socket.addEventListener('open', resolve, { once: true });
+          socket.addEventListener('error', () => reject(new Error('could not reach the phone')), { once: true });
+        });
+        lanSocket = socket;
+        lanSocket.addEventListener('message', (event) => handleIncomingFrame(new Uint8Array(event.data)));
+        lanSocket.addEventListener('close', onDisconnected);
+        onTransportConnected('phone (Wi-Fi)');
+      } catch (err) {
+        setStatus('Error: ' + err.message, 'error');
+        console.error(err);
+      }
+    }
+
     connectBtn.addEventListener('click', async () => {
       if (isConnected()) {
         if (activeTransport === 'ble') device?.gatt?.disconnect();
@@ -871,22 +903,7 @@
       }
 
       if (activeTransport === 'lan') {
-        try {
-          setStatus('Connecting…');
-          const socket = new WebSocket('ws://' + location.host + LAN_WS_PATH);
-          socket.binaryType = 'arraybuffer';
-          await new Promise((resolve, reject) => {
-            socket.addEventListener('open', resolve, { once: true });
-            socket.addEventListener('error', () => reject(new Error('could not reach the phone')), { once: true });
-          });
-          lanSocket = socket;
-          lanSocket.addEventListener('message', (event) => handleIncomingFrame(new Uint8Array(event.data)));
-          lanSocket.addEventListener('close', onDisconnected);
-          onTransportConnected('phone (Wi-Fi)');
-        } catch (err) {
-          setStatus('Error: ' + err.message, 'error');
-          console.error(err);
-        }
+        await connectLan();
         return;
       }
 
@@ -914,6 +931,10 @@
         console.error(err);
       }
     });
+
+    if (activeTransport === 'lan') {
+      connectLan();
+    }
 
     function onDisconnected() {
       setStatus('Disconnected');

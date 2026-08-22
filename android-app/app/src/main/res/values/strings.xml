@@ -18,4 +18,6 @@
 
     <string name="client_mode_title">Preview the guest page on this phone</string>
     <string name="client_mode_button">View</string>
+
+    <string name="hosting_notification_text">Guests can connect over Bluetooth or Wi-Fi</string>
 </resources>
