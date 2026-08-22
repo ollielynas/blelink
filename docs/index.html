@@ -347,6 +347,27 @@
     background: var(--accent-2);
   }
 
+  .ios-hint {
+    margin: 12px 0 0;
+    padding: 12px 14px;
+    border: 2px solid var(--border);
+    border-radius: 10px;
+    background: var(--card);
+    text-align: left;
+  }
+
+  .ios-hint p {
+    margin: 0 0 8px;
+    font-size: 13px;
+    line-height: 1.4;
+  }
+
+  .ios-hint a {
+    font-size: 13px;
+    font-weight: 800;
+    color: var(--accent-2);
+  }
+
   .attach-btn {
     padding: 10px 12px;
     flex-shrink: 0;
@@ -453,6 +474,11 @@
       </div>
 
       <button id="connect">Connect to phone</button>
+
+      <div class="ios-hint" id="iosHint" hidden>
+        <p>Safari doesn't support Bluetooth. Install <strong>Bluefy — Web BLE Browser</strong> (free) from the App Store, then open this page inside Bluefy instead.</p>
+        <a href="https://apps.apple.com/app/bluefy-web-ble-browser/id1492822055" target="_blank" rel="noopener">Get Bluefy on the App Store →</a>
+      </div>
 
       <div class="menu-options">
         <button type="button" class="menu-btn" id="openPhotos">📷 Photos</button>
@@ -785,8 +811,18 @@
       if (e.key === 'Enter') joinChat();
     });
 
+    const iosHintEl = document.getElementById('iosHint');
+    // iPadOS 13+ identifies as "Macintosh" but is touch-capable, unlike a real Mac.
+    const isIOS = /iPad|iPhone|iPod/.test(navigator.userAgent)
+      || (navigator.platform === 'MacIntel' && navigator.maxTouchPoints > 1);
+
     if (!navigator.bluetooth) {
-      setStatus('Web Bluetooth not supported (use Chrome/Edge)', 'error');
+      if (isIOS) {
+        setStatus('Web Bluetooth not supported in Safari', 'error');
+        iosHintEl.hidden = false;
+      } else {
+        setStatus('Web Bluetooth not supported (use Chrome/Edge)', 'error');
+      }
       connectBtn.disabled = true;
     }
 
