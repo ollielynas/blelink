@@ -19,7 +19,6 @@ import android.content.Intent
 import android.net.Uri
 import android.webkit.WebView
 import android.widget.ImageView
-import android.widget.Toast
 import androidx.activity.result.contract.ActivityResultContracts
 import androidx.appcompat.app.AppCompatActivity
 import androidx.browser.customtabs.CustomTabsIntent
@@ -60,12 +59,6 @@ class MainActivity : AppCompatActivity() {
         const val WEB_URL = "https://ollielynas.com/blelink/"
 
         const val BLE_DEVICE_NAME = "BleLink"
-
-        // Custom Tabs just launches whatever the device's *default* browser is, which may not
-        // be Chrome — Firefox for Android (and most non-Chromium browsers) don't implement Web
-        // Bluetooth at all, so client mode would silently fail to even offer a device chooser.
-        // Chrome is the one reliably known to support it, so prefer it explicitly when installed.
-        const val CHROME_PACKAGE = "com.android.chrome"
 
         const val LAN_PORT = 8085
 
@@ -147,36 +140,20 @@ class MainActivity : AppCompatActivity() {
     }
 
     /**
-     * Opens the same guest web app in a Custom Tab (a real Chrome instance, not the limited
-     * WebView used for the YouTube player), so this phone can act as a Web Bluetooth client
-     * to join a *different* BleLink host — useful for testing, or for a guest who'd rather
-     * not leave the app. Runs as a separate process from this app's own GATT server, so
-     * hosting is unaffected while it's open. A phone can't be a Web Bluetooth client to its
-     * own peripheral, so this is only ever useful for connecting to another device over BLE —
-     * for testing against this same phone's own server, the Wi-Fi QR / LAN mode is the way in.
+     * Opens this phone's own LAN mode page in a Custom Tab — the guest web app, talking to
+     * this phone over `localhost` instead of Bluetooth. LAN mode never touches Web Bluetooth,
+     * so unlike the old Bluetooth-only client mode, this actually works: a phone can reach its
+     * own local HTTP server just fine, it just can never be a Web Bluetooth client to its own
+     * BLE peripheral. Runs as a separate process from this app's own servers, so hosting is
+     * unaffected while it's open. No particular browser is required — any of them support
+     * WebSocket.
      */
     private fun openClientMode() {
-        val uri = Uri.parse(WEB_URL)
-        val chromeInstalled = isPackageInstalled(CHROME_PACKAGE)
-        val customTabsIntent = CustomTabsIntent.Builder().build()
-        if (chromeInstalled) {
-            customTabsIntent.intent.setPackage(CHROME_PACKAGE)
-        } else {
-            Toast.makeText(this, "Chrome isn't installed — Web Bluetooth may not work in this browser", Toast.LENGTH_LONG).show()
-        }
+        val uri = Uri.parse("http://localhost:$LAN_PORT/")
         try {
-            customTabsIntent.launchUrl(this, uri)
+            CustomTabsIntent.Builder().build().launchUrl(this, uri)
         } catch (e: Exception) {
             startActivity(Intent(Intent.ACTION_VIEW, uri))
-        }
-    }
-
-    private fun isPackageInstalled(packageName: String): Boolean {
-        return try {
-            packageManager.getPackageInfo(packageName, 0)
-            true
-        } catch (e: PackageManager.NameNotFoundException) {
-            false
         }
     }
 

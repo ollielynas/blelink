@@ -615,9 +615,14 @@
       0x01: 'INVALID_ID',
     };
 
-    // From console.cloud.google.com: enable "YouTube Data API v3", create an API key, and
-    // (recommended) restrict it by HTTP referrer to this site's domain.
-    const YOUTUBE_API_KEY = 'AIzaSyAyGvDwJ-KSSbcb_M68QFFYbtl7yrgWkbU';
+    // From console.cloud.google.com: enable "YouTube Data API v3" and create an API key per
+    // origin this page can run from. The Bluetooth-mode key is restricted by HTTP referrer to
+    // this site's domain; that restriction can't work for LAN mode (Google's referrer matching
+    // doesn't support arbitrary local IPs at all), so LAN mode uses a second, unrestricted key
+    // instead — kept separate so it can be revoked/regenerated independently if ever abused,
+    // without touching the site's normal key.
+    const YOUTUBE_API_KEY_BLE = 'AIzaSyAyGvDwJ-KSSbcb_M68QFFYbtl7yrgWkbU';
+    const YOUTUBE_API_KEY_LAN = 'AIzaSyDq8_1pNX6lgSpxQityXNzhI9IQR_Swgzg';
 
     // Total BLE frame byte length (header + payload) per rung. Web Bluetooth exposes no
     // MTU query/negotiation API, so the effective size can only be discovered by trying a
@@ -1403,11 +1408,12 @@
       }
     });
 
-    // Search runs entirely client-side against YouTube's public Data API — no BLE needed,
-    // works even before connecting to the phone. Only queueing a chosen video needs BLE.
+    // Search runs entirely client-side against YouTube's public Data API — no transport needed,
+    // works even before connecting to the phone. Only queueing a chosen video needs a connection.
     async function searchYouTube(query) {
+      const apiKey = activeTransport === 'lan' ? YOUTUBE_API_KEY_LAN : YOUTUBE_API_KEY_BLE;
       const url = 'https://www.googleapis.com/youtube/v3/search?part=snippet&type=video'
-        + `&maxResults=8&q=${encodeURIComponent(query)}&key=${YOUTUBE_API_KEY}`;
+        + `&maxResults=8&q=${encodeURIComponent(query)}&key=${apiKey}`;
       const res = await fetch(url);
       if (!res.ok) {
         throw new Error(`youtube search failed: HTTP ${res.status}`);

@@ -88,28 +88,20 @@
             android:layout_width="match_parent"
             android:layout_height="wrap_content"
             android:orientation="vertical"
-            android:padding="14dp">
+            android:padding="12dp">
 
             <TextView
                 android:layout_width="wrap_content"
                 android:layout_height="wrap_content"
                 android:text="@string/scan_to_join_header"
                 android:textStyle="bold"
-                android:textSize="15sp"
+                android:textSize="14sp"
                 android:textColor="@color/on_background" />
-
-            <TextView
-                android:layout_width="wrap_content"
-                android:layout_height="wrap_content"
-                android:layout_marginTop="2dp"
-                android:text="@string/scan_to_join_subtitle"
-                android:textSize="12sp"
-                android:textColor="@color/on_surface_variant" />
 
             <LinearLayout
                 android:layout_width="match_parent"
                 android:layout_height="wrap_content"
-                android:layout_marginTop="12dp"
+                android:layout_marginTop="8dp"
                 android:orientation="horizontal"
                 android:gravity="center_vertical">
 
@@ -122,23 +114,23 @@
 
                     <ImageView
                         android:id="@+id/qrImage"
-                        android:layout_width="72dp"
-                        android:layout_height="72dp"
+                        android:layout_width="56dp"
+                        android:layout_height="56dp"
                         android:contentDescription="@string/scan_to_join" />
 
                     <TextView
                         android:layout_width="wrap_content"
                         android:layout_height="wrap_content"
-                        android:layout_marginTop="4dp"
+                        android:layout_marginTop="3dp"
                         android:text="@string/join_label_bluetooth"
                         android:textStyle="bold"
-                        android:textSize="11sp"
+                        android:textSize="10sp"
                         android:textColor="@color/on_surface_variant" />
                 </LinearLayout>
 
                 <View
                     android:layout_width="2dp"
-                    android:layout_height="72dp"
+                    android:layout_height="56dp"
                     android:layout_marginStart="10dp"
                     android:layout_marginEnd="10dp"
                     android:background="@color/outline" />
@@ -151,8 +143,8 @@
                     android:gravity="center">
 
                     <FrameLayout
-                        android:layout_width="72dp"
-                        android:layout_height="72dp">
+                        android:layout_width="56dp"
+                        android:layout_height="56dp">
 
                         <ImageView
                             android:id="@+id/lanQrImage"
@@ -166,7 +158,7 @@
                             android:layout_height="match_parent"
                             android:gravity="center"
                             android:text="@string/lan_unavailable"
-                            android:textSize="9sp"
+                            android:textSize="8sp"
                             android:textColor="@color/on_surface_variant"
                             android:visibility="gone" />
                     </FrameLayout>
@@ -174,19 +166,19 @@
                     <TextView
                         android:layout_width="wrap_content"
                         android:layout_height="wrap_content"
-                        android:layout_marginTop="4dp"
+                        android:layout_marginTop="3dp"
                         android:text="@string/join_label_wifi"
                         android:textStyle="bold"
-                        android:textSize="11sp"
+                        android:textSize="10sp"
                         android:textColor="@color/on_surface_variant" />
                 </LinearLayout>
             </LinearLayout>
 
             <View
                 android:layout_width="match_parent"
-                android:layout_height="2dp"
-                android:layout_marginTop="14dp"
-                android:layout_marginBottom="12dp"
+                android:layout_height="1dp"
+                android:layout_marginTop="10dp"
+                android:layout_marginBottom="8dp"
                 android:background="@color/outline" />
 
             <LinearLayout
@@ -195,37 +187,27 @@
                 android:orientation="horizontal"
                 android:gravity="center_vertical">
 
-                <LinearLayout
+                <TextView
                     android:layout_width="0dp"
                     android:layout_height="wrap_content"
                     android:layout_weight="1"
-                    android:orientation="vertical">
-
-                    <TextView
-                        android:layout_width="wrap_content"
-                        android:layout_height="wrap_content"
-                        android:text="@string/client_mode_title"
-                        android:textStyle="bold"
-                        android:textSize="13sp"
-                        android:textColor="@color/on_background" />
-
-                    <TextView
-                        android:layout_width="wrap_content"
-                        android:layout_height="wrap_content"
-                        android:layout_marginTop="2dp"
-                        android:text="@string/client_mode_explainer"
-                        android:textSize="11sp"
-                        android:lineSpacingExtra="2sp"
-                        android:textColor="@color/on_surface_variant" />
-                </LinearLayout>
+                    android:text="@string/client_mode_title"
+                    android:textSize="12sp"
+                    android:textColor="@color/on_surface_variant" />
 
                 <Button
                     android:id="@+id/openClientModeBtn"
                     android:layout_width="wrap_content"
-                    android:layout_height="wrap_content"
+                    android:layout_height="36dp"
                     android:layout_marginStart="10dp"
+                    android:minHeight="0dp"
+                    android:insetTop="0dp"
+                    android:insetBottom="0dp"
+                    android:paddingTop="0dp"
+                    android:paddingBottom="0dp"
                     android:text="@string/client_mode_button"
                     android:textAllCaps="false"
+                    android:textSize="12sp"
                     style="@style/Widget.Material3.Button.TonalButton" />
             </LinearLayout>
         </LinearLayout>
