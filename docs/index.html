@@ -694,7 +694,13 @@
     let rxCharacteristic = null; // write to phone (BLE transport)
     let lanSocket = null; // WebSocket to the phone's LAN server (LAN transport)
     let device = null;
-    let myName = null;
+    // Persisted so reloading the page (or reopening client mode) doesn't ask again —
+    // localStorage is per-origin, so this is remembered separately per transport, which is
+    // fine since it's the same physical guest either way. Wrapped in try/catch since some
+    // browsers throw when storage is disabled (private browsing, blocked cookies, etc).
+    let myName = (() => {
+      try { return localStorage.getItem('blelinkName'); } catch (e) { return null; }
+    })();
 
     // The phone's own LAN server is always plain http:// (no way to get a real TLS cert for a
     // local IP); GitHub Pages is always https://. That difference alone is enough to pick a
@@ -836,6 +842,7 @@
       const name = chatNameInput.value.trim();
       if (!name) return;
       myName = name.slice(0, 30);
+      try { localStorage.setItem('blelinkName', myName); } catch (e) { /* storage unavailable */ }
       chatNameEntryEl.hidden = true;
       chatBodyEl.hidden = false;
       chatInput.focus();
@@ -946,6 +953,7 @@
       rxCharacteristic = null;
       lanSocket = null;
       chatRecvBuffer = null;
+      fileRecvBuffer?.bubble?.remove();
       fileRecvBuffer = null;
       musicQueueRecvBuffer = null;
       musicSyncRecvBuffer = null;
@@ -1031,12 +1039,18 @@
         handleAck(value, pendingFileAcks);
       } else if (opcode === OP_FILE_RECV) {
         const { id, length } = parseLenFrame(value);
-        fileRecvBuffer = { msgId: id, expected: length, chunks: [] };
+        const { bubble, fill } = createReceivingBubble();
+        fileRecvBuffer = { msgId: id, expected: length, chunks: [], bubble, fill };
       } else if (opcode === OP_FILE_RECV_DATA) {
         if (!fileRecvBuffer) return;
         const { id, payload } = parseDataFrame(value);
         if (id !== fileRecvBuffer.msgId) return;
         fileRecvBuffer.chunks.push(payload);
+        const received = fileRecvBuffer.chunks.reduce((n, c) => n + c.length, 0);
+        if (fileRecvBuffer.expected > 0 && fileRecvBuffer.fill) {
+          const pct = Math.min(100, Math.round((received / fileRecvBuffer.expected) * 100));
+          fileRecvBuffer.fill.style.width = pct + '%';
+        }
       } else if (opcode === OP_FILE_RECV_END) {
         if (!fileRecvBuffer) return;
         const { id } = parseLenFrame(value);
@@ -1055,9 +1069,10 @@
           const header = JSON.parse(new TextDecoder().decode(merged.subarray(2, 2 + headerLen)));
           const fileBytes = merged.subarray(2 + headerLen);
           const blob = new Blob([fileBytes], { type: header.m || 'application/octet-stream' });
-          addFileBubble(header.s || 'Guest', header.n || 'file', header.m || '', URL.createObjectURL(blob), fileBytes.length, false);
+          addFileBubble(header.s || 'Guest', header.n || 'file', header.m || '', URL.createObjectURL(blob), fileBytes.length, false, buffered.bubble);
         } catch (err) {
           log('failed to parse received file: ' + err.message);
+          buffered.bubble?.remove();
         }
       } else if (opcode === OP_MUSIC_QUEUE_ACK) {
         handleAck(value, pendingQueueAcks, MUSIC_QUEUE_STATUS_NAMES);
@@ -1327,8 +1342,35 @@
 
     // Renders a shared file inline in the chat: an <img> for images, otherwise a small
     // file card with a name/size and a download link, mirroring addChatBubble's layout.
-    function addFileBubble(name, fileName, mime, blobUrl, sizeBytes, mine) {
+    // Placeholder bubble shown the moment a file starts arriving from another guest, so
+    // receiving isn't silent — updated with real progress as DATA frames come in, then
+    // replaced in place by addFileBubble() once the transfer completes.
+    function createReceivingBubble() {
       const bubble = document.createElement('div');
+      bubble.className = 'chat-bubble';
+
+      const nameEl = document.createElement('div');
+      nameEl.className = 'chat-bubble-name';
+      nameEl.textContent = 'Receiving…';
+      bubble.appendChild(nameEl);
+
+      const track = document.createElement('div');
+      track.className = 'progress-track';
+      track.style.marginTop = '4px';
+      const fill = document.createElement('div');
+      fill.className = 'progress-fill';
+      fill.style.width = '0%';
+      track.appendChild(fill);
+      bubble.appendChild(track);
+
+      chatMessagesEl.appendChild(bubble);
+      chatMessagesEl.scrollTop = chatMessagesEl.scrollHeight;
+      return { bubble, fill };
+    }
+
+    function addFileBubble(name, fileName, mime, blobUrl, sizeBytes, mine, existingBubble) {
+      const bubble = existingBubble || document.createElement('div');
+      bubble.innerHTML = '';
       bubble.className = 'chat-bubble' + (mine ? ' mine' : '');
 
       const nameEl = document.createElement('div');
@@ -1373,7 +1415,7 @@
         bubble.appendChild(card);
       }
 
-      chatMessagesEl.appendChild(bubble);
+      if (!existingBubble) chatMessagesEl.appendChild(bubble);
       chatMessagesEl.scrollTop = chatMessagesEl.scrollHeight;
     }
 

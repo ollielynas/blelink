@@ -31,6 +31,7 @@ import org.json.JSONObject
 import java.io.IOException
 import java.net.Inet4Address
 import java.net.NetworkInterface
+import java.util.Collections
 import java.util.UUID
 import java.util.concurrent.ConcurrentHashMap
 import java.util.concurrent.Executors
@@ -66,6 +67,11 @@ class MainActivity : AppCompatActivity() {
         // stand-in so the exact same chunked START/DATA/END framing (and reassembly code) works
         // unchanged for both transports — it just produces far fewer, bigger chunks over LAN.
         const val LAN_VIRTUAL_MTU = 16_000
+
+        // Chat is a pure live relay with no history — a guest who joins mid-conversation used to
+        // see nothing said before they connected. This is how many recent messages get replayed
+        // to a newly connected guest instead.
+        const val CHAT_HISTORY_LIMIT = 30
     }
 
     private lateinit var binding: ActivityMainBinding
@@ -87,6 +93,9 @@ class MainActivity : AppCompatActivity() {
     private val chatReceiveStates = ConcurrentHashMap<String, ChatReceiveState>()
     private val fileReceiveStates = ConcurrentHashMap<String, FileReceiveState>()
     private val musicQueueReceiveStates = ConcurrentHashMap<String, MusicReceiveState>()
+    // Raw wire payloads (name+separator+text, exactly as broadcastChat sends them) for the most
+    // recent messages, replayed to each newly connected guest — see replayChatHistoryTo.
+    private val chatHistory = Collections.synchronizedList(mutableListOf<ByteArray>())
     private var chatMsgIdCounter = 0
     private var fileMsgIdCounter = 0
     private var musicMsgIdCounter = 0
@@ -440,6 +449,20 @@ class MainActivity : AppCompatActivity() {
     private fun onPeerConnected(peer: Peer.Lan) {
         connectedPeers[peer.id] = peer
         updateStatusFromConnectionCount()
+        replayChatHistoryTo(peer)
+    }
+
+    /** Sends every buffered chat message to just this one newly connected peer, so joining
+     *  mid-conversation doesn't mean missing everything said before. */
+    private fun replayChatHistoryTo(peer: Peer) {
+        val snapshot = synchronized(chatHistory) { chatHistory.toList() }
+        for (bytes in snapshot) {
+            sendFramedToPeer(
+                peer,
+                ChatProtocol.OP_CHAT_RECV, ChatProtocol.OP_CHAT_RECV_DATA, ChatProtocol.OP_CHAT_RECV_END,
+                nextChatMsgId(), bytes
+            )
+        }
     }
 
     /** Shared disconnect cleanup for both transports. */
@@ -519,8 +542,12 @@ class MainActivity : AppCompatActivity() {
             value: ByteArray
         ) {
             if (descriptor.uuid == CCCD_UUID) {
-                (connectedPeers[device.address] as? Peer.Ble)?.notificationsEnabled =
-                    value.contentEquals(BluetoothGattDescriptor.ENABLE_NOTIFICATION_VALUE)
+                val peer = connectedPeers[device.address] as? Peer.Ble
+                val enabling = value.contentEquals(BluetoothGattDescriptor.ENABLE_NOTIFICATION_VALUE)
+                peer?.notificationsEnabled = enabling
+                // Only now — not at STATE_CONNECTED — can this peer actually receive anything;
+                // sendToPeer no-ops until notificationsEnabled is true.
+                if (enabling && peer != null) replayChatHistoryTo(peer)
             }
             if (responseNeeded) {
                 gattServer?.sendResponse(device, requestId, BluetoothGatt.GATT_SUCCESS, offset, null)
@@ -614,6 +641,11 @@ class MainActivity : AppCompatActivity() {
         chatReceiveStates.remove(peer.id)
         val text = String(bytes, Charsets.UTF_8)
         val senderId = peer.id
+
+        synchronized(chatHistory) {
+            chatHistory.add(bytes)
+            if (chatHistory.size > CHAT_HISTORY_LIMIT) chatHistory.removeAt(0)
+        }
 
         sendChatAck(peer, end.msgId, ChatProtocol.STATUS_OK)
         appendLog("chat relay: $text")
