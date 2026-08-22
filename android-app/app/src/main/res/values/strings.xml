@@ -2,8 +2,13 @@
 <resources>
     <string name="app_name">BleLink</string>
     <string name="status_starting">Starting…</string>
-    <string name="scan_to_join">Scan to join</string>
+    <string name="scan_to_join_header">Scan to join</string>
+    <string name="scan_to_join">Scan to join over Bluetooth</string>
     <string name="scan_to_join_subtitle">Queue music and upload photos</string>
+    <string name="scan_to_join_lan">Scan to join over Wi-Fi</string>
+    <string name="join_label_bluetooth">Bluetooth</string>
+    <string name="join_label_wifi">Wi-Fi</string>
+    <string name="lan_unavailable">No Wi-Fi network detected</string>
     <string name="live_gallery">Live gallery</string>
     <string name="empty_gallery">No photos yet — waiting for someone to send one</string>
     <string name="gallery_photo_description">Received photo</string>

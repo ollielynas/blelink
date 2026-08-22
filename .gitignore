@@ -1,6 +1,9 @@
 android-app/local.properties
 android-app/**/build/
 android-app/.gradle/
+# Generated at build time from docs/index.html by the copyWebClientAsset Gradle task — docs/index.html
+# is the single source of truth, this is just its build output for LanServer to serve.
+android-app/app/src/main/assets/web_client.html
 *.apk
 .idea/
 *.iml

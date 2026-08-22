@@ -677,9 +677,30 @@
     const joinAudioBtn = document.getElementById('joinAudioBtn');
     const syncPlayerContainer = document.getElementById('syncPlayerContainer');
 
-    let rxCharacteristic = null; // write to phone
+    let rxCharacteristic = null; // write to phone (BLE transport)
+    let lanSocket = null; // WebSocket to the phone's LAN server (LAN transport)
     let device = null;
     let myName = null;
+
+    // The phone's own LAN server is always plain http:// (no way to get a real TLS cert for a
+    // local IP); GitHub Pages is always https://. That difference alone is enough to pick a
+    // transport with no query param or extra config needed.
+    const activeTransport = location.protocol === 'http:' ? 'lan' : 'ble';
+    const LAN_WS_PATH = '/ws';
+
+    function isConnected() {
+      return activeTransport === 'ble' ? !!rxCharacteristic : !!(lanSocket && lanSocket.readyState === WebSocket.OPEN);
+    }
+
+    // Every outbound frame (chunked sends and the bare ping) funnels through here so the rest
+    // of the app never has to know which transport is active.
+    function transportWrite(bytes) {
+      if (activeTransport === 'ble') {
+        return rxCharacteristic.writeValueWithResponse(bytes);
+      }
+      lanSocket.send(bytes);
+      return Promise.resolve();
+    }
 
     let transferIdCounter = 0;
     let chatMsgIdCounter = 0;
@@ -816,7 +837,9 @@
     const isIOS = /iPad|iPhone|iPod/.test(navigator.userAgent)
       || (navigator.platform === 'MacIntel' && navigator.maxTouchPoints > 1);
 
-    if (!navigator.bluetooth) {
+    // LAN mode never touches navigator.bluetooth at all, so browsers/devices without Web
+    // Bluetooth (notably iOS Safari) still work fine when connecting over Wi-Fi.
+    if (activeTransport === 'ble' && !navigator.bluetooth) {
       if (isIOS) {
         setStatus('Web Bluetooth not supported in Safari', 'error');
         iosHintEl.hidden = false;
@@ -826,9 +849,39 @@
       connectBtn.disabled = true;
     }
 
+    function onTransportConnected(label) {
+      setStatus('Connected to ' + label, 'connected');
+      connectBtn.textContent = 'Disconnect from phone';
+      takePhotoBtn.disabled = false;
+      chatInput.disabled = false;
+      chatSendBtn.disabled = false;
+      chatAttachBtn.disabled = false;
+    }
+
     connectBtn.addEventListener('click', async () => {
-      if (rxCharacteristic) {
-        device?.gatt?.disconnect();
+      if (isConnected()) {
+        if (activeTransport === 'ble') device?.gatt?.disconnect();
+        else lanSocket?.close();
+        return;
+      }
+
+      if (activeTransport === 'lan') {
+        try {
+          setStatus('Connecting…');
+          const socket = new WebSocket('ws://' + location.host + LAN_WS_PATH);
+          socket.binaryType = 'arraybuffer';
+          await new Promise((resolve, reject) => {
+            socket.addEventListener('open', resolve, { once: true });
+            socket.addEventListener('error', () => reject(new Error('could not reach the phone')), { once: true });
+          });
+          lanSocket = socket;
+          lanSocket.addEventListener('message', (event) => handleIncomingFrame(new Uint8Array(event.data)));
+          lanSocket.addEventListener('close', onDisconnected);
+          onTransportConnected('phone (Wi-Fi)');
+        } catch (err) {
+          setStatus('Error: ' + err.message, 'error');
+          console.error(err);
+        }
         return;
       }
 
@@ -850,12 +903,7 @@
         await txCharacteristic.startNotifications();
         txCharacteristic.addEventListener('characteristicvaluechanged', onTxNotification);
 
-        setStatus('Connected to ' + (device.name || device.id), 'connected');
-        connectBtn.textContent = 'Disconnect from phone';
-        takePhotoBtn.disabled = false;
-        chatInput.disabled = false;
-        chatSendBtn.disabled = false;
-        chatAttachBtn.disabled = false;
+        onTransportConnected(device.name || device.id);
       } catch (err) {
         setStatus('Error: ' + err.message, 'error');
         console.error(err);
@@ -870,6 +918,7 @@
       chatSendBtn.disabled = true;
       chatAttachBtn.disabled = true;
       rxCharacteristic = null;
+      lanSocket = null;
       chatRecvBuffer = null;
       fileRecvBuffer = null;
       musicQueueRecvBuffer = null;
@@ -912,8 +961,13 @@
       return { id, payload };
     }
 
+    // BLE delivers frames via a characteristic-changed event; LAN delivers them via a WebSocket
+    // message event. Both funnel into this one transport-agnostic handler.
     function onTxNotification(event) {
-      const value = new Uint8Array(event.target.value.buffer);
+      handleIncomingFrame(new Uint8Array(event.target.value.buffer));
+    }
+
+    function handleIncomingFrame(value) {
       if (value.length < 1) return;
       const opcode = value[0];
 
@@ -1110,7 +1164,7 @@
     // Uses the adaptive chunk-size ladder (shrink-on-write-failure, cached for the connection).
     async function sendChunked(opStart, opData, opEnd, id, bytes, onProgress) {
       const totalLength = bytes.length;
-      await rxCharacteristic.writeValueWithResponse(buildStartFrame(opStart, id, totalLength));
+      await transportWrite(buildStartFrame(opStart, id, totalLength));
 
       let offset = 0;
       let seq = 0;
@@ -1121,11 +1175,14 @@
         const frame = buildDataFrame(opData, id, seq, payload);
 
         try {
-          await rxCharacteristic.writeValueWithResponse(frame);
+          await transportWrite(frame);
           offset += payload.length;
           seq++;
           if (onProgress) onProgress(offset, totalLength);
         } catch (err) {
+          // Only BLE writes ever fail this way (LAN's transportWrite never throws here);
+          // shrinking the chunk-size ladder is meaningless for LAN so this is effectively dead
+          // code there, which is fine — it just never triggers.
           if (chunkSizeIndex < CHUNK_SIZE_LADDER.length - 1) {
             chunkSizeIndex++;
             log(`write failed, shrinking chunk size to ${CHUNK_SIZE_LADDER[chunkSizeIndex]} bytes`);
@@ -1135,7 +1192,7 @@
         }
       }
 
-      await rxCharacteristic.writeValueWithResponse(buildEndFrame(opEnd, id, totalLength));
+      await transportWrite(buildEndFrame(opEnd, id, totalLength));
     }
 
     // Compresses `file` into a JPEG blob under MAX_PHOTO_BYTES, shrinking dimensions/quality
@@ -1175,7 +1232,7 @@
     photoInput.addEventListener('change', async () => {
       const file = photoInput.files[0];
       photoInput.value = '';
-      if (!file || !rxCharacteristic) return;
+      if (!file || !isConnected()) return;
 
       takePhotoBtn.disabled = true;
       try {
@@ -1194,7 +1251,7 @@
         setProgress(null);
         log('send failed: ' + err.message);
       } finally {
-        takePhotoBtn.disabled = !rxCharacteristic;
+        takePhotoBtn.disabled = !isConnected();
       }
     });
 
@@ -1219,7 +1276,7 @@
 
     async function sendChatMessage() {
       const text = chatInput.value.trim();
-      if (!text || !rxCharacteristic || !myName) return;
+      if (!text || !isConnected() || !myName) return;
       chatInput.value = '';
       chatSendBtn.disabled = true;
       try {
@@ -1233,7 +1290,7 @@
       } catch (err) {
         log('chat send failed: ' + err.message);
       } finally {
-        chatSendBtn.disabled = !rxCharacteristic;
+        chatSendBtn.disabled = !isConnected();
       }
     }
 
@@ -1330,7 +1387,7 @@
     chatFileInput.addEventListener('change', async () => {
       const file = chatFileInput.files[0];
       chatFileInput.value = '';
-      if (!file || !rxCharacteristic || !myName) return;
+      if (!file || !isConnected() || !myName) return;
 
       chatAttachBtn.disabled = true;
       try {
@@ -1342,7 +1399,7 @@
         setFileProgress(null);
         log('file send failed: ' + err.message);
       } finally {
-        chatAttachBtn.disabled = !rxCharacteristic;
+        chatAttachBtn.disabled = !isConnected();
       }
     });
 
@@ -1446,7 +1503,7 @@
     }
 
     async function queueSelected(video, btn) {
-      if (!rxCharacteristic) {
+      if (!isConnected()) {
         setMusicStatus('Connect to the phone first to queue songs.');
         return;
       }
@@ -1538,7 +1595,7 @@
     }
 
     async function sendPing() {
-      if (!rxCharacteristic) return;
+      if (!isConnected()) return;
       const id = nextPingId();
       const sentAt = performance.now();
       const settled = new Promise((resolve) => {
@@ -1549,7 +1606,7 @@
         pendingPings.set(id, { sentAt, timer, resolve });
       });
       try {
-        await rxCharacteristic.writeValueWithResponse(new Uint8Array([OP_MUSIC_PING, id]));
+        await transportWrite(new Uint8Array([OP_MUSIC_PING, id]));
       } catch (err) {
         pendingPings.delete(id);
         return;

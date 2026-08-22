@@ -18,6 +18,7 @@ import android.os.Looper
 import android.content.Intent
 import android.net.Uri
 import android.webkit.WebView
+import android.widget.ImageView
 import android.widget.Toast
 import androidx.activity.result.contract.ActivityResultContracts
 import androidx.appcompat.app.AppCompatActivity
@@ -28,19 +29,25 @@ import com.blelink.app.databinding.ActivityMainBinding
 import com.google.zxing.BarcodeFormat
 import com.google.zxing.qrcode.QRCodeWriter
 import org.json.JSONObject
+import java.io.IOException
+import java.net.Inet4Address
+import java.net.NetworkInterface
 import java.util.UUID
 import java.util.concurrent.ConcurrentHashMap
 import java.util.concurrent.Executors
 
 /**
- * Acts as a BLE peripheral exposing a UART-style GATT service:
- *  - RX characteristic: central (e.g. a browser via Web Bluetooth) writes to this;
- *    the phone receives photo-transfer frames here (see PhotoProtocol).
- *  - TX characteristic: phone notifies the central on this with PHOTO_ACK frames.
- * Web Bluetooth can only act as a GATT client/central, never a peripheral,
- * which is why the phone must be the peripheral side. Multiple browsers can
- * be connected at once; BLE's own hardware connection ceiling is the natural
- * throttle, so no explicit connection-limit logic is needed here.
+ * Acts as a BLE peripheral exposing a UART-style GATT service, *and* as a plain HTTP+WebSocket
+ * server on the local network (see LanServer) — two independent transports guests can use to
+ * reach the exact same relay. Both feed the same protocol-level handlers below via the `Peer`
+ * abstraction (see Peer.kt): callers never need to know or care which transport a given guest
+ * came in on.
+ *  - RX characteristic / WebSocket messages: guest -> phone frames (see *Protocol.kt).
+ *  - TX characteristic / WebSocket sends: phone -> guest frames.
+ * Web Bluetooth can only act as a GATT client/central, never a peripheral, which is why the
+ * phone must be the peripheral side for BLE. Multiple guests can be connected at once on either
+ * transport; BLE's own hardware connection ceiling is the natural throttle there, so no explicit
+ * connection-limit logic is needed.
  */
 class MainActivity : AppCompatActivity() {
 
@@ -59,6 +66,13 @@ class MainActivity : AppCompatActivity() {
         // Bluetooth at all, so client mode would silently fail to even offer a device chooser.
         // Chrome is the one reliably known to support it, so prefer it explicitly when installed.
         const val CHROME_PACKAGE = "com.android.chrome"
+
+        const val LAN_PORT = 8085
+
+        // LAN has no MTU concept the way BLE does; sendFramedToPeer uses this as a generous
+        // stand-in so the exact same chunked START/DATA/END framing (and reassembly code) works
+        // unchanged for both transports — it just produces far fewer, bigger chunks over LAN.
+        const val LAN_VIRTUAL_MTU = 16_000
     }
 
     private lateinit var binding: ActivityMainBinding
@@ -70,15 +84,12 @@ class MainActivity : AppCompatActivity() {
     private var advertiser: BluetoothLeAdvertiser? = null
     private var gattServer: BluetoothGattServer? = null
     private var txCharacteristic: BluetoothGattCharacteristic? = null
+    private var lanServer: LanServer? = null
+    private var lastLanIp: String? = null
 
-    // Per-device state, keyed by device address, to support multiple concurrent centrals.
-    private data class DeviceState(
-        val device: BluetoothDevice,
-        var notificationsEnabled: Boolean = false,
-        var mtu: Int = 23
-    )
-
-    private val connectedDevices = ConcurrentHashMap<String, DeviceState>()
+    // Connected guests, regardless of transport (see Peer.kt), keyed by a transport-appropriate
+    // id: the BLE device address, or a generated "lan-<uuid>" for a WebSocket connection.
+    private val connectedPeers = ConcurrentHashMap<String, Peer>()
     private val photoReceiveStates = ConcurrentHashMap<String, PhotoReceiveState>()
     private val chatReceiveStates = ConcurrentHashMap<String, ChatReceiveState>()
     private val fileReceiveStates = ConcurrentHashMap<String, FileReceiveState>()
@@ -92,8 +103,8 @@ class MainActivity : AppCompatActivity() {
     private val youtubeIdPattern = Regex("^[A-Za-z0-9_-]{11}$")
 
     private val decodeExecutor = Executors.newSingleThreadExecutor()
-    // Serializes chat relaying so a single browser never receives interleaved
-    // DATA frames from two different chat messages on the same characteristic.
+    // Serializes chat relaying so a single guest never receives interleaved
+    // DATA frames from two different chat messages on the same connection.
     private val chatExecutor = Executors.newSingleThreadExecutor()
     // Separate from chatExecutor so a large file relay never blocks plain text chat messages
     // (or vice versa) from going out promptly.
@@ -129,7 +140,9 @@ class MainActivity : AppCompatActivity() {
         setUpYoutubePlayer()
         binding.openClientModeBtn.setOnClickListener { openClientMode() }
 
-        showQrCode()
+        showQrInto(binding.qrImage, WEB_URL)
+        startLanServer()
+        startLanIpRefreshLoop()
         requestPermissionsAndStart()
     }
 
@@ -139,7 +152,8 @@ class MainActivity : AppCompatActivity() {
      * to join a *different* BleLink host — useful for testing, or for a guest who'd rather
      * not leave the app. Runs as a separate process from this app's own GATT server, so
      * hosting is unaffected while it's open. A phone can't be a Web Bluetooth client to its
-     * own peripheral, so this is only ever useful for connecting to another device.
+     * own peripheral, so this is only ever useful for connecting to another device over BLE —
+     * for testing against this same phone's own server, the Wi-Fi QR / LAN mode is the way in.
      */
     private fun openClientMode() {
         val uri = Uri.parse(WEB_URL)
@@ -186,9 +200,9 @@ class MainActivity : AppCompatActivity() {
 
     /**
      * Every few seconds, asks the WebView what's currently playing and relays that (video id +
-     * position + playing/paused) to every connected browser, so a guest who taps "Join Audio"
-     * can play the same video in their own tab and stay roughly — not sample-accurately —
-     * in step. BLE latency and per-guest buffering make tighter sync impractical.
+     * position + playing/paused) to every connected guest, so one who taps "Join Audio" can
+     * play the same video in their own tab and stay roughly — not sample-accurately — in step.
+     * Transport latency and per-guest buffering make tighter sync impractical.
      */
     private fun startMusicSyncLoop() {
         val intervalMs = 2_000L
@@ -205,7 +219,7 @@ class MainActivity : AppCompatActivity() {
 
     private fun broadcastMusicSync(rawJson: String?) {
         if (rawJson.isNullOrEmpty() || rawJson == "null") return
-        if (connectedDevices.isEmpty()) return
+        if (connectedPeers.isEmpty()) return
         // evaluateJavascript's callback hands back a JSON-encoded *string* (quotes escaped);
         // unwrap it once to get the actual JSON object payload it contains.
         val json = try {
@@ -223,29 +237,90 @@ class MainActivity : AppCompatActivity() {
         val bytes = payload.toString().toByteArray(Charsets.UTF_8)
 
         val syncId = nextMusicMsgId()
-        for (recipient in connectedDevices.values) {
-            if (!recipient.notificationsEnabled) continue
-            sendFramedToDevice(
-                recipient.device, recipient.mtu,
+        for (peer in connectedPeers.values) {
+            if (!isPeerReady(peer)) continue
+            sendFramedToPeer(
+                peer,
                 MusicProtocol.OP_MUSIC_SYNC, MusicProtocol.OP_MUSIC_SYNC_DATA, MusicProtocol.OP_MUSIC_SYNC_END,
                 syncId, bytes
             )
         }
     }
 
-    private fun showQrCode() {
+    private fun showQrInto(imageView: ImageView, content: String) {
         try {
             val size = 512
-            val matrix = QRCodeWriter().encode(WEB_URL, BarcodeFormat.QR_CODE, size, size)
+            val matrix = QRCodeWriter().encode(content, BarcodeFormat.QR_CODE, size, size)
             val bitmap = Bitmap.createBitmap(size, size, Bitmap.Config.RGB_565)
             for (x in 0 until size) {
                 for (y in 0 until size) {
                     bitmap.setPixel(x, y, if (matrix[x, y]) Color.BLACK else Color.WHITE)
                 }
             }
-            binding.qrImage.setImageBitmap(bitmap)
+            imageView.setImageBitmap(bitmap)
         } catch (e: Exception) {
             appendLog("QR generation failed: ${e.message}")
+        }
+    }
+
+    /** First non-loopback IPv4 address of any active network interface — Wi-Fi, hotspot, USB
+     *  tethering, whatever's actually up — used to build the LAN join URL / QR code. */
+    private fun getLocalLanIp(): String? {
+        return try {
+            NetworkInterface.getNetworkInterfaces().asSequence()
+                .filter { it.isUp && !it.isLoopback }
+                .flatMap { it.inetAddresses.asSequence() }
+                .filterIsInstance<Inet4Address>()
+                .firstOrNull()
+                ?.hostAddress
+        } catch (e: Exception) {
+            null
+        }
+    }
+
+    private fun startLanIpRefreshLoop() {
+        val intervalMs = 5_000L
+        val loop = object : Runnable {
+            override fun run() {
+                updateLanQrIfChanged()
+                mainHandler.postDelayed(this, intervalMs)
+            }
+        }
+        updateLanQrIfChanged()
+        mainHandler.postDelayed(loop, intervalMs)
+    }
+
+    private fun updateLanQrIfChanged() {
+        val ip = getLocalLanIp()
+        if (ip == lastLanIp) return
+        lastLanIp = ip
+        runOnUiThread {
+            if (ip == null) {
+                binding.lanQrImage.visibility = android.view.View.GONE
+                binding.lanQrUnavailableText.visibility = android.view.View.VISIBLE
+            } else {
+                binding.lanQrUnavailableText.visibility = android.view.View.GONE
+                binding.lanQrImage.visibility = android.view.View.VISIBLE
+                showQrInto(binding.lanQrImage, "http://$ip:$LAN_PORT/")
+            }
+        }
+    }
+
+    private fun startLanServer() {
+        val server = LanServer(
+            port = LAN_PORT,
+            htmlProvider = { assets.open("web_client.html").bufferedReader().use { it.readText() } },
+            onPeerOpen = { peer -> onPeerConnected(peer) },
+            onPeerMessage = { peerId, data ->
+                connectedPeers[peerId]?.let { peer -> handleIncomingFrame(peer, data) }
+            },
+            onPeerClose = { peerId -> onPeerDisconnected(peerId) }
+        )
+        try {
+            server.start(fi.iki.elonen.NanoHTTPD.SOCKET_READ_TIMEOUT, false)
+            lanServer = server
+        } catch (e: IOException) {
+            appendLog("LAN server failed to start: ${e.message}")
         }
     }
 
@@ -347,11 +422,11 @@ class MainActivity : AppCompatActivity() {
     }
 
     private fun updateStatusFromConnectionCount() {
-        val count = connectedDevices.size
+        val count = connectedPeers.size
         val connected = count > 0
         setStatus(
-            if (!connected) "Waiting for a browser to connect"
-            else "Connected: $count device(s)"
+            if (!connected) "Waiting for a guest to connect"
+            else "Connected: $count guest(s)"
         )
         runOnUiThread {
             val pillBg = binding.statusPill.background.mutate() as GradientDrawable
@@ -364,27 +439,64 @@ class MainActivity : AppCompatActivity() {
         }
     }
 
+    private fun isPeerReady(peer: Peer): Boolean = when (peer) {
+        is Peer.Ble -> peer.notificationsEnabled
+        is Peer.Lan -> true // no CCCD dance over a WebSocket — it's bidirectional as soon as it's open
+    }
+
+    private fun onPeerConnected(peer: Peer.Lan) {
+        connectedPeers[peer.id] = peer
+        updateStatusFromConnectionCount()
+    }
+
+    /** Shared disconnect cleanup for both transports. */
+    private fun onPeerDisconnected(peerId: String) {
+        connectedPeers.remove(peerId)
+        photoReceiveStates.remove(peerId)
+        chatReceiveStates.remove(peerId)
+        fileReceiveStates.remove(peerId)
+        musicQueueReceiveStates.remove(peerId)
+        updateStatusFromConnectionCount()
+    }
+
+    /** Shared opcode dispatch for both transports — a BLE GATT write and a LAN WebSocket
+     *  message both end up here once resolved to a Peer. */
+    private fun handleIncomingFrame(peer: Peer, value: ByteArray) {
+        if (value.isEmpty()) return
+        when (value[0]) {
+            PhotoProtocol.OP_PHOTO_START -> handlePhotoStart(peer, value)
+            PhotoProtocol.OP_PHOTO_DATA -> handlePhotoData(peer, value)
+            PhotoProtocol.OP_PHOTO_END -> handlePhotoEnd(peer, value)
+            ChatProtocol.OP_CHAT_SEND -> handleChatStart(peer, value)
+            ChatProtocol.OP_CHAT_SEND_DATA -> handleChatData(peer, value)
+            ChatProtocol.OP_CHAT_SEND_END -> handleChatEnd(peer, value)
+            FileProtocol.OP_FILE_SEND -> handleFileStart(peer, value)
+            FileProtocol.OP_FILE_SEND_DATA -> handleFileData(peer, value)
+            FileProtocol.OP_FILE_SEND_END -> handleFileEnd(peer, value)
+            MusicProtocol.OP_MUSIC_QUEUE -> handleMusicQueueStart(peer, value)
+            MusicProtocol.OP_MUSIC_QUEUE_DATA -> handleMusicQueueData(peer, value)
+            MusicProtocol.OP_MUSIC_QUEUE_END -> handleMusicQueueEnd(peer, value)
+            MusicProtocol.OP_MUSIC_PING -> handleMusicPing(peer, value)
+        }
+    }
+
     @SuppressLint("MissingPermission")
     private val gattServerCallback = object : BluetoothGattServerCallback() {
 
         override fun onConnectionStateChange(device: BluetoothDevice, status: Int, newState: Int) {
             when (newState) {
                 BluetoothProfile.STATE_CONNECTED -> {
-                    connectedDevices[device.address] = DeviceState(device)
+                    connectedPeers[device.address] = Peer.Ble(device)
+                    updateStatusFromConnectionCount()
                 }
                 BluetoothProfile.STATE_DISCONNECTED -> {
-                    connectedDevices.remove(device.address)
-                    photoReceiveStates.remove(device.address)
-                    chatReceiveStates.remove(device.address)
-                    fileReceiveStates.remove(device.address)
-                    musicQueueReceiveStates.remove(device.address)
+                    onPeerDisconnected(device.address)
                 }
             }
-            updateStatusFromConnectionCount()
         }
 
         override fun onMtuChanged(device: BluetoothDevice, mtu: Int) {
-            connectedDevices[device.address]?.mtu = mtu
+            (connectedPeers[device.address] as? Peer.Ble)?.mtu = mtu
         }
 
         override fun onCharacteristicWriteRequest(
@@ -397,21 +509,7 @@ class MainActivity : AppCompatActivity() {
             value: ByteArray
         ) {
             if (characteristic.uuid == RX_CHAR_UUID && value.isNotEmpty()) {
-                when (value[0]) {
-                    PhotoProtocol.OP_PHOTO_START -> handlePhotoStart(device, value)
-                    PhotoProtocol.OP_PHOTO_DATA -> handlePhotoData(device, value)
-                    PhotoProtocol.OP_PHOTO_END -> handlePhotoEnd(device, value)
-                    ChatProtocol.OP_CHAT_SEND -> handleChatStart(device, value)
-                    ChatProtocol.OP_CHAT_SEND_DATA -> handleChatData(device, value)
-                    ChatProtocol.OP_CHAT_SEND_END -> handleChatEnd(device, value)
-                    FileProtocol.OP_FILE_SEND -> handleFileStart(device, value)
-                    FileProtocol.OP_FILE_SEND_DATA -> handleFileData(device, value)
-                    FileProtocol.OP_FILE_SEND_END -> handleFileEnd(device, value)
-                    MusicProtocol.OP_MUSIC_QUEUE -> handleMusicQueueStart(device, value)
-                    MusicProtocol.OP_MUSIC_QUEUE_DATA -> handleMusicQueueData(device, value)
-                    MusicProtocol.OP_MUSIC_QUEUE_END -> handleMusicQueueEnd(device, value)
-                    MusicProtocol.OP_MUSIC_PING -> handleMusicPing(device, value)
-                }
+                connectedPeers[device.address]?.let { peer -> handleIncomingFrame(peer, value) }
             }
             if (responseNeeded) {
                 gattServer?.sendResponse(device, requestId, BluetoothGatt.GATT_SUCCESS, offset, null)
@@ -428,7 +526,7 @@ class MainActivity : AppCompatActivity() {
             value: ByteArray
         ) {
             if (descriptor.uuid == CCCD_UUID) {
-                connectedDevices[device.address]?.notificationsEnabled =
+                (connectedPeers[device.address] as? Peer.Ble)?.notificationsEnabled =
                     value.contentEquals(BluetoothGattDescriptor.ENABLE_NOTIFICATION_VALUE)
             }
             if (responseNeeded) {
@@ -437,39 +535,39 @@ class MainActivity : AppCompatActivity() {
         }
     }
 
-    private fun handlePhotoStart(device: BluetoothDevice, value: ByteArray) {
+    private fun handlePhotoStart(peer: Peer, value: ByteArray) {
         val start = PhotoProtocol.parseStart(value) ?: return
         if (start.totalLength > PhotoProtocol.MAX_PHOTO_BYTES) {
-            appendLog("photo too large from ${device.address}: ${start.totalLength} bytes")
-            sendAck(device, start.transferId, PhotoProtocol.STATUS_ERR_TOO_LARGE)
+            appendLog("photo too large from ${peer.id}: ${start.totalLength} bytes")
+            sendAck(peer, start.transferId, PhotoProtocol.STATUS_ERR_TOO_LARGE)
             return
         }
-        // A new START discards any stale in-flight buffer for this device (e.g. a reloaded page).
-        photoReceiveStates[device.address] = PhotoReceiveState(start.transferId, start.totalLength)
-        appendLog("photo start from ${device.address}: ${start.totalLength} bytes")
+        // A new START discards any stale in-flight buffer for this peer (e.g. a reloaded page).
+        photoReceiveStates[peer.id] = PhotoReceiveState(start.transferId, start.totalLength)
+        appendLog("photo start from ${peer.id}: ${start.totalLength} bytes")
     }
 
-    private fun handlePhotoData(device: BluetoothDevice, value: ByteArray) {
+    private fun handlePhotoData(peer: Peer, value: ByteArray) {
         val data = PhotoProtocol.parseData(value) ?: return
-        val state = photoReceiveStates[device.address] ?: return
+        val state = photoReceiveStates[peer.id] ?: return
         if (data.transferId != state.transferId) return
         state.append(data.payload)
     }
 
-    private fun handlePhotoEnd(device: BluetoothDevice, value: ByteArray) {
+    private fun handlePhotoEnd(peer: Peer, value: ByteArray) {
         val end = PhotoProtocol.parseEnd(value) ?: return
-        val state = photoReceiveStates[device.address] ?: return
+        val state = photoReceiveStates[peer.id] ?: return
         if (end.transferId != state.transferId) return
 
         if (state.buffer.size() != end.totalLength) {
-            appendLog("length mismatch from ${device.address}: got ${state.buffer.size()}, expected ${end.totalLength}")
-            sendAck(device, end.transferId, PhotoProtocol.STATUS_ERR_LENGTH_MISMATCH)
-            photoReceiveStates.remove(device.address)
+            appendLog("length mismatch from ${peer.id}: got ${state.buffer.size()}, expected ${end.totalLength}")
+            sendAck(peer, end.transferId, PhotoProtocol.STATUS_ERR_LENGTH_MISMATCH)
+            photoReceiveStates.remove(peer.id)
             return
         }
 
         val bytes = state.toByteArray()
-        photoReceiveStates.remove(device.address)
+        photoReceiveStates.remove(peer.id)
 
         decodeExecutor.execute {
             val bitmap = try {
@@ -478,8 +576,8 @@ class MainActivity : AppCompatActivity() {
                 null
             }
             if (bitmap == null) {
-                appendLog("decode failed from ${device.address}")
-                sendAck(device, end.transferId, PhotoProtocol.STATUS_ERR_DECODE_FAILED)
+                appendLog("decode failed from ${peer.id}")
+                sendAck(peer, end.transferId, PhotoProtocol.STATUS_ERR_DECODE_FAILED)
                 return@execute
             }
             runOnUiThread {
@@ -487,113 +585,113 @@ class MainActivity : AppCompatActivity() {
                 binding.emptyGalleryText.visibility = android.view.View.GONE
                 binding.photoRecyclerView.smoothScrollToPosition(0)
             }
-            appendLog("photo received from ${device.address}")
-            sendAck(device, end.transferId, PhotoProtocol.STATUS_OK)
+            appendLog("photo received from ${peer.id}")
+            sendAck(peer, end.transferId, PhotoProtocol.STATUS_OK)
         }
     }
 
-    private fun handleChatStart(device: BluetoothDevice, value: ByteArray) {
+    private fun handleChatStart(peer: Peer, value: ByteArray) {
         val start = ChatProtocol.parseStart(value) ?: return
         if (start.totalLength > ChatProtocol.MAX_CHAT_BYTES) {
-            sendChatAck(device, start.msgId, ChatProtocol.STATUS_ERR_TOO_LARGE)
+            sendChatAck(peer, start.msgId, ChatProtocol.STATUS_ERR_TOO_LARGE)
             return
         }
-        chatReceiveStates[device.address] = ChatReceiveState(start.msgId, start.totalLength)
+        chatReceiveStates[peer.id] = ChatReceiveState(start.msgId, start.totalLength)
     }
 
-    private fun handleChatData(device: BluetoothDevice, value: ByteArray) {
+    private fun handleChatData(peer: Peer, value: ByteArray) {
         val data = ChatProtocol.parseData(value) ?: return
-        val state = chatReceiveStates[device.address] ?: return
+        val state = chatReceiveStates[peer.id] ?: return
         if (data.msgId != state.msgId) return
         state.append(data.payload)
     }
 
-    private fun handleChatEnd(device: BluetoothDevice, value: ByteArray) {
+    private fun handleChatEnd(peer: Peer, value: ByteArray) {
         val end = ChatProtocol.parseEnd(value) ?: return
-        val state = chatReceiveStates[device.address] ?: return
+        val state = chatReceiveStates[peer.id] ?: return
         if (end.msgId != state.msgId) return
 
         if (state.buffer.size() != end.totalLength) {
-            sendChatAck(device, end.msgId, ChatProtocol.STATUS_ERR_LENGTH_MISMATCH)
-            chatReceiveStates.remove(device.address)
+            sendChatAck(peer, end.msgId, ChatProtocol.STATUS_ERR_LENGTH_MISMATCH)
+            chatReceiveStates.remove(peer.id)
             return
         }
 
         val bytes = state.toByteArray()
-        chatReceiveStates.remove(device.address)
+        chatReceiveStates.remove(peer.id)
         val text = String(bytes, Charsets.UTF_8)
-        val senderAddress = device.address
+        val senderId = peer.id
 
-        sendChatAck(device, end.msgId, ChatProtocol.STATUS_OK)
+        sendChatAck(peer, end.msgId, ChatProtocol.STATUS_OK)
         appendLog("chat relay: $text")
 
         chatExecutor.execute {
-            broadcastChat(excludeAddress = senderAddress, text = text)
+            broadcastChat(excludeId = senderId, text = text)
         }
     }
 
-    /** Relays a chat message to every connected device except the original sender. */
-    private fun broadcastChat(excludeAddress: String, text: String) {
+    /** Relays a chat message to every connected guest except the original sender, on either transport. */
+    private fun broadcastChat(excludeId: String, text: String) {
         val bytes = text.toByteArray(Charsets.UTF_8)
         val msgId = nextChatMsgId()
-        for ((address, state) in connectedDevices) {
-            if (address == excludeAddress) continue
-            if (!state.notificationsEnabled) continue
-            sendFramedToDevice(
-                state.device, state.mtu,
+        for ((id, peer) in connectedPeers) {
+            if (id == excludeId) continue
+            if (!isPeerReady(peer)) continue
+            sendFramedToPeer(
+                peer,
                 ChatProtocol.OP_CHAT_RECV, ChatProtocol.OP_CHAT_RECV_DATA, ChatProtocol.OP_CHAT_RECV_END,
                 msgId, bytes
             )
         }
     }
 
-    private fun handleFileStart(device: BluetoothDevice, value: ByteArray) {
+    private fun handleFileStart(peer: Peer, value: ByteArray) {
         val start = FileProtocol.parseStart(value) ?: return
         if (start.totalLength > FileProtocol.MAX_FILE_BYTES) {
-            sendFileAck(device, start.msgId, FileProtocol.STATUS_ERR_TOO_LARGE)
+            sendFileAck(peer, start.msgId, FileProtocol.STATUS_ERR_TOO_LARGE)
             return
         }
-        fileReceiveStates[device.address] = FileReceiveState(start.msgId, start.totalLength)
+        fileReceiveStates[peer.id] = FileReceiveState(start.msgId, start.totalLength)
     }
 
-    private fun handleFileData(device: BluetoothDevice, value: ByteArray) {
+    private fun handleFileData(peer: Peer, value: ByteArray) {
         val data = FileProtocol.parseData(value) ?: return
-        val state = fileReceiveStates[device.address] ?: return
+        val state = fileReceiveStates[peer.id] ?: return
         if (data.msgId != state.msgId) return
         state.append(data.payload)
     }
 
-    private fun handleFileEnd(device: BluetoothDevice, value: ByteArray) {
+    private fun handleFileEnd(peer: Peer, value: ByteArray) {
         val end = FileProtocol.parseEnd(value) ?: return
-        val state = fileReceiveStates[device.address] ?: return
+        val state = fileReceiveStates[peer.id] ?: return
         if (end.msgId != state.msgId) return
 
         if (state.buffer.size() != end.totalLength) {
-            sendFileAck(device, end.msgId, FileProtocol.STATUS_ERR_LENGTH_MISMATCH)
-            fileReceiveStates.remove(device.address)
+            sendFileAck(peer, end.msgId, FileProtocol.STATUS_ERR_LENGTH_MISMATCH)
+            fileReceiveStates.remove(peer.id)
             return
         }
 
         val bytes = state.toByteArray()
-        fileReceiveStates.remove(device.address)
-        val senderAddress = device.address
+        fileReceiveStates.remove(peer.id)
+        val senderId = peer.id
 
-        sendFileAck(device, end.msgId, FileProtocol.STATUS_OK)
+        sendFileAck(peer, end.msgId, FileProtocol.STATUS_OK)
         appendLog("file relay: ${bytes.size} bytes")
 
         fileExecutor.execute {
-            broadcastFile(excludeAddress = senderAddress, bytes = bytes)
+            broadcastFile(excludeId = senderId, bytes = bytes)
         }
     }
 
-    /** Relays a shared file to every connected device except the original sender. */
-    private fun broadcastFile(excludeAddress: String, bytes: ByteArray) {
+    /** Relays a shared file to every connected guest except the original sender, on either transport. */
+    private fun broadcastFile(excludeId: String, bytes: ByteArray) {
         val msgId = nextFileMsgId()
-        for ((address, state) in connectedDevices) {
-            if (address == excludeAddress) continue
-            if (!state.notificationsEnabled) continue
-            sendFramedToDevice(
-                state.device, state.mtu,
+        for ((id, peer) in connectedPeers) {
+            if (id == excludeId) continue
+            if (!isPeerReady(peer)) continue
+            sendFramedToPeer(
+                peer,
                 FileProtocol.OP_FILE_RECV, FileProtocol.OP_FILE_RECV_DATA, FileProtocol.OP_FILE_RECV_END,
                 msgId, bytes
             )
@@ -601,24 +699,27 @@ class MainActivity : AppCompatActivity() {
     }
 
     /**
-     * Chunked send of one id+bytes payload to a single device as opStart/opData/opEnd
-     * frames, sized to the device's actual negotiated MTU when known (falls back to the
-     * guaranteed-safe unnegotiated default: 23-byte ATT MTU, 3-byte header, 20 usable).
-     * Shared by chat relay, file relay, and music search results.
+     * Chunked send of one id+bytes payload to a single peer as opStart/opData/opEnd frames,
+     * sized to the peer's effective MTU (BLE's actual negotiated MTU, or a large fixed virtual
+     * MTU for LAN — see LAN_VIRTUAL_MTU). Shared by chat relay, file relay, and music search
+     * results, on both transports.
      */
-    private fun sendFramedToDevice(
-        device: BluetoothDevice,
-        mtu: Int,
+    private fun sendFramedToPeer(
+        peer: Peer,
         opStart: Byte,
         opData: Byte,
         opEnd: Byte,
         id: Byte,
         bytes: ByteArray
     ) {
+        val mtu = when (peer) {
+            is Peer.Ble -> peer.mtu
+            is Peer.Lan -> LAN_VIRTUAL_MTU
+        }
         val dataHeaderSize = 4 // opcode + id + seq(u16)
         val payloadSize = (mtu - 3 - dataHeaderSize).coerceAtLeast(1)
 
-        notifyDevice(device, buildLenFrame(opStart, id, bytes.size))
+        sendToPeer(peer, buildLenFrame(opStart, id, bytes.size))
         var offset = 0
         var seq = 0
         while (offset < bytes.size) {
@@ -629,11 +730,11 @@ class MainActivity : AppCompatActivity() {
             frame[2] = ((seq shr 8) and 0xFF).toByte()
             frame[3] = (seq and 0xFF).toByte()
             chunk.copyInto(frame, 4)
-            notifyDevice(device, frame)
+            sendToPeer(peer, frame)
             offset += chunk.size
             seq++
         }
-        notifyDevice(device, buildLenFrame(opEnd, id, bytes.size))
+        sendToPeer(peer, buildLenFrame(opEnd, id, bytes.size))
     }
 
     private fun buildLenFrame(opcode: Byte, id: Byte, totalLength: Int): ByteArray {
@@ -665,25 +766,25 @@ class MainActivity : AppCompatActivity() {
         return musicMsgIdCounter.toByte()
     }
 
-    private fun handleMusicQueueStart(device: BluetoothDevice, value: ByteArray) {
+    private fun handleMusicQueueStart(peer: Peer, value: ByteArray) {
         val start = MusicProtocol.parseQueueStart(value) ?: return
         if (start.totalLength > MusicProtocol.MAX_QUEUE_PAYLOAD_BYTES) return
-        musicQueueReceiveStates[device.address] =
+        musicQueueReceiveStates[peer.id] =
             MusicReceiveState(start.msgId, start.totalLength, MusicProtocol.MAX_QUEUE_PAYLOAD_BYTES)
     }
 
-    private fun handleMusicQueueData(device: BluetoothDevice, value: ByteArray) {
+    private fun handleMusicQueueData(peer: Peer, value: ByteArray) {
         val data = MusicProtocol.parseQueueData(value) ?: return
-        val state = musicQueueReceiveStates[device.address] ?: return
+        val state = musicQueueReceiveStates[peer.id] ?: return
         if (data.msgId != state.msgId) return
         state.append(data.payload)
     }
 
-    private fun handleMusicQueueEnd(device: BluetoothDevice, value: ByteArray) {
+    private fun handleMusicQueueEnd(peer: Peer, value: ByteArray) {
         val end = MusicProtocol.parseQueueEnd(value) ?: return
-        val state = musicQueueReceiveStates[device.address] ?: return
+        val state = musicQueueReceiveStates[peer.id] ?: return
         if (end.msgId != state.msgId) return
-        musicQueueReceiveStates.remove(device.address)
+        musicQueueReceiveStates.remove(peer.id)
         if (state.buffer.size() != end.totalLength) return
 
         val payloadBytes = state.toByteArray()
@@ -693,73 +794,80 @@ class MainActivity : AppCompatActivity() {
             ""
         }
         if (!youtubeIdPattern.matches(videoId)) {
-            sendMusicQueueAck(device, end.msgId, MusicProtocol.QUEUE_STATUS_INVALID_ID)
+            sendMusicQueueAck(peer, end.msgId, MusicProtocol.QUEUE_STATUS_INVALID_ID)
             return
         }
 
         runOnUiThread {
             binding.youtubePlayerWebView.evaluateJavascript("addToQueue('$videoId')", null)
         }
-        appendLog("queued video $videoId from ${device.address}")
-        sendMusicQueueAck(device, end.msgId, MusicProtocol.QUEUE_STATUS_OK)
+        appendLog("queued video $videoId from ${peer.id}")
+        sendMusicQueueAck(peer, end.msgId, MusicProtocol.QUEUE_STATUS_OK)
 
-        // Relay the same title/channel payload to every connected browser (including the
+        // Relay the same title/channel payload to every connected guest (including the
         // sender) so everyone's "recently queued" list stays in sync.
         val broadcastId = nextMusicMsgId()
-        for (recipient in connectedDevices.values) {
-            if (!recipient.notificationsEnabled) continue
-            sendFramedToDevice(
-                recipient.device, recipient.mtu,
+        for (recipient in connectedPeers.values) {
+            if (!isPeerReady(recipient)) continue
+            sendFramedToPeer(
+                recipient,
                 MusicProtocol.OP_MUSIC_QUEUE_RECV, MusicProtocol.OP_MUSIC_QUEUE_RECV_DATA, MusicProtocol.OP_MUSIC_QUEUE_RECV_END,
                 broadcastId, payloadBytes
             )
         }
     }
 
-    @SuppressLint("MissingPermission")
-    private fun sendMusicQueueAck(device: BluetoothDevice, msgId: Byte, status: Byte) {
-        notifyDevice(device, MusicProtocol.buildQueueAck(msgId, status))
+    private fun sendMusicQueueAck(peer: Peer, msgId: Byte, status: Byte) {
+        sendToPeer(peer, MusicProtocol.buildQueueAck(msgId, status))
     }
 
     /** Echoes a sync-latency ping straight back with no processing delay, so the round-trip
-     *  time a browser measures reflects transport latency, not app work. */
-    private fun handleMusicPing(device: BluetoothDevice, value: ByteArray) {
+     *  time a guest measures reflects transport latency, not app work. */
+    private fun handleMusicPing(peer: Peer, value: ByteArray) {
         if (value.size < 2) return
         val pingId = value[1]
-        notifyDevice(device, byteArrayOf(MusicProtocol.OP_MUSIC_PONG, pingId))
+        sendToPeer(peer, byteArrayOf(MusicProtocol.OP_MUSIC_PONG, pingId))
+    }
+
+    private fun sendAck(peer: Peer, transferId: Byte, status: Byte) {
+        sendToPeer(peer, PhotoProtocol.buildAck(transferId, status))
+    }
+
+    private fun sendChatAck(peer: Peer, msgId: Byte, status: Byte) {
+        sendToPeer(peer, ChatProtocol.buildAck(msgId, status))
+    }
+
+    private fun sendFileAck(peer: Peer, msgId: Byte, status: Byte) {
+        sendToPeer(peer, FileProtocol.buildAck(msgId, status))
     }
 
     @SuppressLint("MissingPermission")
-    private fun sendAck(device: BluetoothDevice, transferId: Byte, status: Byte) {
-        notifyDevice(device, PhotoProtocol.buildAck(transferId, status))
-    }
+    private fun sendToPeer(peer: Peer, payload: ByteArray) {
+        when (peer) {
+            is Peer.Ble -> {
+                if (!peer.notificationsEnabled) return
+                val server = gattServer ?: return
+                val characteristic = txCharacteristic ?: return
 
-    @SuppressLint("MissingPermission")
-    private fun sendChatAck(device: BluetoothDevice, msgId: Byte, status: Byte) {
-        notifyDevice(device, ChatProtocol.buildAck(msgId, status))
-    }
-
-    @SuppressLint("MissingPermission")
-    private fun sendFileAck(device: BluetoothDevice, msgId: Byte, status: Byte) {
-        notifyDevice(device, FileProtocol.buildAck(msgId, status))
-    }
-
-    @SuppressLint("MissingPermission")
-    private fun notifyDevice(device: BluetoothDevice, payload: ByteArray) {
-        val server = gattServer ?: return
-        val characteristic = txCharacteristic ?: return
-        val deviceState = connectedDevices[device.address] ?: return
-        if (!deviceState.notificationsEnabled) return
-
-        // BluetoothGattCharacteristic is a single shared mutable object; on API 33+ use the
-        // overload that takes the value directly (no shared-state mutation, safe with multiple
-        // concurrent centrals). On older APIs, synchronize the legacy set+notify pair.
-        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) {
-            server.notifyCharacteristicChanged(device, characteristic, false, payload)
-        } else {
-            synchronized(characteristic) {
-                characteristic.value = payload
-                server.notifyCharacteristicChanged(device, characteristic, false)
+                // BluetoothGattCharacteristic is a single shared mutable object; on API 33+ use
+                // the overload that takes the value directly (no shared-state mutation, safe
+                // with multiple concurrent centrals). On older APIs, synchronize the legacy
+                // set+notify pair.
+                if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) {
+                    server.notifyCharacteristicChanged(peer.device, characteristic, false, payload)
+                } else {
+                    synchronized(characteristic) {
+                        characteristic.value = payload
+                        server.notifyCharacteristicChanged(peer.device, characteristic, false)
+                    }
+                }
+            }
+            is Peer.Lan -> {
+                try {
+                    peer.socket.send(payload)
+                } catch (e: IOException) {
+                    // Guest likely disconnected; the WebSocket's onClose will clean the peer up shortly.
+                }
             }
         }
     }
@@ -777,6 +885,7 @@ class MainActivity : AppCompatActivity() {
         super.onDestroy()
         advertiser?.stopAdvertising(advertiseCallback)
         gattServer?.close()
+        lanServer?.stop()
         decodeExecutor.shutdown()
         chatExecutor.shutdown()
         fileExecutor.shutdown()

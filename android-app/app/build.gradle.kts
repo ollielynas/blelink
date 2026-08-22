@@ -46,4 +46,22 @@ dependencies {
     // YouTube player — actually supports Web Bluetooth, so "client mode" can reuse the exact
     // same web app guests already use instead of reimplementing the BLE central role natively.
     implementation("androidx.browser:browser:1.8.0")
+    // Embedded HTTP+WebSocket server for LAN mode — lets the same guest web app talk to the
+    // phone over the local network instead of BLE (works even from the phone's own browser,
+    // unlike a Web Bluetooth client connecting to the phone's own GATT server).
+    implementation("org.nanohttpd:nanohttpd:2.3.1")
+    implementation("org.nanohttpd:nanohttpd-websocket:2.3.1")
+}
+
+// docs/index.html is the single source of truth for the guest web app; copy it into assets at
+// build time so LanServer can serve it locally without hand-maintaining a second copy that can
+// drift out of sync.
+val copyWebClientAsset = tasks.register<Copy>("copyWebClientAsset") {
+    from("${project.projectDir}/../../docs/index.html")
+    into("${project.projectDir}/src/main/assets")
+    rename { "web_client.html" }
+}
+
+tasks.named("preBuild") {
+    dependsOn(copyWebClientAsset)
 }
