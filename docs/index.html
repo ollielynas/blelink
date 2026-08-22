@@ -295,6 +295,11 @@
     margin-top: 4px;
   }
 
+  a:has(> .chat-bubble-image) {
+    display: block;
+    cursor: pointer;
+  }
+
   .chat-bubble-file {
     display: flex;
     align-items: center;
@@ -1379,11 +1384,18 @@
       bubble.appendChild(nameEl);
 
       if (mime.startsWith('image/')) {
+        // Wrapping in a download link is the only way to get a real "Save image" affordance
+        // for a blob: URL — a bare <img> gives no click-to-save option at all.
+        const link = document.createElement('a');
+        link.href = blobUrl;
+        link.download = fileName;
+        link.title = 'Click to download';
         const img = document.createElement('img');
         img.className = 'chat-bubble-image';
         img.src = blobUrl;
         img.alt = fileName;
-        bubble.appendChild(img);
+        link.appendChild(img);
+        bubble.appendChild(link);
       } else {
         const card = document.createElement('div');
         card.className = 'chat-bubble-file';
@@ -1464,7 +1476,10 @@
         setFileProgress('Sent ✓', 100);
         setTimeout(() => setFileProgress(null), 1500);
       } catch (err) {
-        setFileProgress(null);
+        // Previously this only logged to the console — a file that failed to send (e.g. a
+        // non-image over the size cap) looked exactly like one that quietly succeeded.
+        setFileProgress('Failed: ' + err.message, 0);
+        setTimeout(() => setFileProgress(null), 4000);
         log('file send failed: ' + err.message);
       } finally {
         chatAttachBtn.disabled = !isConnected();
