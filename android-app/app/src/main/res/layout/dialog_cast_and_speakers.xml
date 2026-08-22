@@ -76,7 +76,6 @@
         android:layout_height="wrap_content"
         android:layout_marginTop="10dp"
         android:text="@string/open_bluetooth_settings"
-        android:textAllCaps="false"
-        style="@style/Widget.Material3.Button.TonalButton" />
+        android:textAllCaps="false" />
 
 </LinearLayout>

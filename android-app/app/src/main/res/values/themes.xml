@@ -17,7 +17,7 @@
          dark navy/purple clashing with the rest of the light, warm palette. -->
     <style name="Widget.BleLink.Button.Utility" parent="Widget.Material3.Button.OutlinedButton">
         <item name="strokeColor">@color/outline</item>
-        <item name="strokeWidth">2dp</item>
+        <item name="strokeWidth">1dp</item>
         <item name="backgroundTint">@color/surface</item>
         <item name="android:textColor">@color/on_background</item>
         <item name="iconTint">@color/on_background</item>

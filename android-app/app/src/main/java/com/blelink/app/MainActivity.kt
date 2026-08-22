@@ -256,6 +256,16 @@ class MainActivity : AppCompatActivity() {
 
         val dialog = BottomSheetDialog(this)
         dialog.setContentView(view)
+        // Material's BottomSheetDialog draws its own surface behind the inflated content,
+        // themed from M3 color roles this app's sparse custom theme never defined — it was
+        // rendering as a near-black sheet, clashing with the rest of the light, warm palette.
+        // Overriding that internal container's background directly fixes it without needing a
+        // full M3 color scheme; it has to happen in setOnShowListener, not right after
+        // setContentView — the bottom sheet's view isn't attached yet at that point.
+        dialog.setOnShowListener {
+            dialog.findViewById<android.view.View>(com.google.android.material.R.id.design_bottom_sheet)
+                ?.setBackgroundResource(R.drawable.bg_bottom_sheet)
+        }
         view.findViewById<android.widget.Button>(R.id.openBluetoothSettingsBtn).setOnClickListener {
             startActivity(Intent(Settings.ACTION_BLUETOOTH_SETTINGS))
             dialog.dismiss()
